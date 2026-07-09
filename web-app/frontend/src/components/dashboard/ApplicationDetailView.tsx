@@ -12,11 +12,13 @@ import Alert from '@cloudscape-design/components/alert';
 import Tabs from '@cloudscape-design/components/tabs';
 import { ApplicationMetricsCard } from './ApplicationMetricsCard';
 import { MetricsTab } from './MetricsTab';
+import { ReassignTeamModal } from './ReassignTeamModal';
 import { UsecasesTable, UsecaseItem } from '../common/UsecasesTable';
 import { TestSuitesTable } from '../common/TestSuitesTable';
 import { DashboardOverviewItem } from '../../types/application';
 import { api, TestSuite } from '../../utils/api';
 import { useBatchExecute } from '../../hooks/useBatchExecute';
+import { usePermissions } from '../../auth';
 
 
 export default function ApplicationDetailView() {
@@ -45,6 +47,8 @@ export default function ApplicationDetailView() {
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState('');
   const { executeBatch, executing } = useBatchExecute();
+  const { isAdmin } = usePermissions();
+  const [reassignVisible, setReassignVisible] = useState(false);
 
   const loadData = useCallback(async () => {
     if (!id) return;
@@ -137,6 +141,7 @@ export default function ApplicationDetailView() {
         variant="h1"
         actions={
           <SpaceBetween direction="horizontal" size="m">
+            {isAdmin && <Button onClick={() => setReassignVisible(true)}>Assign to team</Button>}
             <Button onClick={() => navigate(`/applications/${id}/edit`)}>Edit</Button>
             <Button variant="primary" onClick={() => navigate(`/create/new?applicationId=${id}`)}>Create usecase</Button>
           </SpaceBetween>
@@ -144,6 +149,17 @@ export default function ApplicationDetailView() {
       >
         {app.name}
       </Header>
+
+      {isAdmin && (
+        <ReassignTeamModal
+          visible={reassignVisible}
+          onDismiss={() => setReassignVisible(false)}
+          onSuccess={loadData}
+          applicationId={id!}
+          applicationName={app.name}
+          currentTeamId={(app as any).owner_team_id}
+        />
+      )}
 
       <ApplicationMetricsCard app={app} hideHeader />
 

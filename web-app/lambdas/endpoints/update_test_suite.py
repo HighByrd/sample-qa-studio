@@ -70,8 +70,16 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if 'Item' not in response:
             logger.warning(f"Test suite {suite_id} not found")
             return create_response(404, {'error': 'Test suite not found'})
-        
+
         suite = response['Item']
+
+        # Resource-level authorization: check edit access on the suite's app
+        suite_app_id = suite.get('application_id', '')
+        if suite_app_id:
+            from resource_auth import authorize_resource
+            _, auth_err = authorize_resource(event, suite_app_id, 'edit')
+            if auth_err:
+                return auth_err
         
         # Extract and validate update fields
         name = body.get('name')

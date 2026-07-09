@@ -65,6 +65,34 @@ export class NovaActQAStudioStorageStack extends NovaActQAStudioBaseStack {
       projectionType: ProjectionType.ALL,
     });
 
+    // Add GSI for querying user team memberships (permissions feature)
+    this.table.addGlobalSecondaryIndex({
+      indexName: 'user-teams-index',
+      partitionKey: {
+        name: 'gsi1pk',
+        type: AttributeType.STRING
+      },
+      sortKey: {
+        name: 'gsi1sk',
+        type: AttributeType.STRING
+      },
+      projectionType: ProjectionType.ALL,
+    });
+
+    // Add GSI2 for querying team-owned apps and shared-with grants (permissions feature)
+    this.table.addGlobalSecondaryIndex({
+      indexName: 'team-apps-index',
+      partitionKey: {
+        name: 'gsi2pk',
+        type: AttributeType.STRING
+      },
+      sortKey: {
+        name: 'gsi2sk',
+        type: AttributeType.STRING
+      },
+      projectionType: ProjectionType.ALL,
+    });
+
     const backupVault = new BackupVault(this, "dynamodb_backup_vault", {
       backupVaultName: this.cdkName('backup-vault'),
       removalPolicy: RemovalPolicy.DESTROY,
@@ -141,6 +169,7 @@ export class NovaActQAStudioStorageStack extends NovaActQAStudioBaseStack {
           actions: [
             'dynamodb:PutItem',
             'dynamodb:UpdateItem',
+            'dynamodb:DeleteItem',
             'dynamodb:BatchWriteItem'
           ],
           resources: [

@@ -16,6 +16,10 @@ from qa_studio_cli.commands.tests import tests
 from qa_studio_cli.commands.suites import suites
 from qa_studio_cli.commands.run import run
 from qa_studio_cli.commands.tui import tui
+from qa_studio_cli.commands.teams import teams
+from qa_studio_cli.commands.members import members
+from qa_studio_cli.commands.users import users
+from qa_studio_cli.commands.apps import apps
 
 
 def require_config(fn):
@@ -145,6 +149,10 @@ cli.add_command(tests)
 cli.add_command(suites)
 cli.add_command(run)
 cli.add_command(tui)
+cli.add_command(teams)
+cli.add_command(members)
+cli.add_command(users)
+cli.add_command(apps)
 
 
 @cli.command()

@@ -993,7 +993,10 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       path: 'application_router',
       timeout: cdk.Duration.seconds(15),
       memorySize: 256,
-      environment: { TABLE_NAME: props.table.tableName }
+      environment: {
+        TABLE_NAME: props.table.tableName,
+        USER_POOL_ID: props.userPool.userPoolId,
+      }
     })
 
     // Router handles all /applications/* and /dashboard/* routes — parallel requests
@@ -1007,8 +1010,30 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       resources: ['*']
     }))
 
+    // Grant Cognito Admin permissions for team provisioning + user management (permissions feature)
+    this.applicationRouterLambda.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: [
+        'cognito-idp:AdminAddUserToGroup',
+        'cognito-idp:AdminRemoveUserFromGroup',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminDeleteUser',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:CreateGroup',
+        'cognito-idp:DeleteGroup',
+        'cognito-idp:ListUsers',
+      ],
+      resources: [props.userPool.userPoolArn]
+    }))
+
     this.applicationRouterLambda.role?.addManagedPolicy(props.tableReadPolicy)
     this.applicationRouterLambda.role?.addManagedPolicy(props.tableWritePolicy)
+
+    // No permissions-migration Lambda: v1.3 is backward-compatible by
+    // construction. Existing apps are unowned (admin-only) and legacy non-admin
+    // users have no team, so they see nothing until an admin sets up teams and
+    // assigns applications. Legacy 'admins'-group users retain full access.
 
     // ========== Browser Recording Lambdas ==========
 
@@ -1034,6 +1059,8 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
     const readLambdas = [
       this.listUsecasesLambda,
       this.getUsecaseLambda,
+      this.createUsecaseLambda,
+      this.createTestSuiteLambda,
       this.listStepsLambda,
       this.listExecutionsLambda,
       this.getExecutionStepLambda,

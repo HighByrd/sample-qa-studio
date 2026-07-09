@@ -33,10 +33,31 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         usecase_id, error = validate_path_id(event.get('pathParameters', {}).get('id'), 'usecase ID')
         if error:
             return error
-        
+
         # Initialize Amazon DynamoDB client
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(get_table_name())
+
+        # Resource-level authorization: check delete access on the usecase's app
+        uc_response = table.get_item(
+            Key={'pk': 'USECASES', 'sk': f'USECASE#{usecase_id}'}
+        )
+        uc_item = uc_response.get('Item', {})
+        uc_app_id = uc_item.get('application_id', '')
+        if uc_app_id:
+            from resource_auth import authorize_resource
+            cb_response = table.get_item(
+                Key={'pk': f'USECASE#{usecase_id}', 'sk': 'CREATED_BY'}
+            )
+            created_by_sub = cb_response.get('Item', {}).get('sub', '')
+            # owner_team_id from the already-loaded use case → no app read.
+            # Omit when absent (older records) so it falls back to reading the app.
+            auth_kwargs = {'created_by': created_by_sub}
+            if uc_item.get('owner_team_id'):
+                auth_kwargs['owner_team_id'] = uc_item['owner_team_id']
+            _, auth_err = authorize_resource(event, uc_app_id, 'delete', **auth_kwargs)
+            if auth_err:
+                return auth_err
         
         # Delete Amazon Nova Act workflow definition if it exists
         delete_workflow_definition(usecase_id)

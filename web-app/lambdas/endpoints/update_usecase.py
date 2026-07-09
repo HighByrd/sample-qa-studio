@@ -34,7 +34,31 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         usecase_id, error = validate_path_id(event.get('pathParameters', {}).get('id'), 'usecase ID')
         if error:
             return error
-        
+
+        # Resource-level authorization: look up the usecase's app and check edit access
+        dynamodb_check = boto3.resource('dynamodb')
+        table_check = dynamodb_check.Table(get_table_name())
+        uc_response = table_check.get_item(
+            Key={'pk': 'USECASES', 'sk': f'USECASE#{usecase_id}'}
+        )
+        uc_item = uc_response.get('Item', {})
+        uc_app_id = uc_item.get('application_id', '')
+        if uc_app_id:
+            from resource_auth import authorize_resource
+            # Get created_by for creator-retains-edit override
+            cb_response = table_check.get_item(
+                Key={'pk': f'USECASE#{usecase_id}', 'sk': 'CREATED_BY'}
+            )
+            created_by_sub = cb_response.get('Item', {}).get('sub', '')
+            # owner_team_id from the already-loaded use case → no app read.
+            # Omit when absent (older records) so it falls back to reading the app.
+            auth_kwargs = {'created_by': created_by_sub}
+            if uc_item.get('owner_team_id'):
+                auth_kwargs['owner_team_id'] = uc_item['owner_team_id']
+            _, auth_err = authorize_resource(event, uc_app_id, 'edit', **auth_kwargs)
+            if auth_err:
+                return auth_err
+
         # Parse request body
         body = json.loads(event.get('body', '{}'))
         

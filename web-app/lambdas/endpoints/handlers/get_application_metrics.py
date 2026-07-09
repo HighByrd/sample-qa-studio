@@ -20,6 +20,11 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if error:
         return error
 
+    from resource_auth import authorize_resource
+    _, auth_err = authorize_resource(event, app_id, 'view')
+    if auth_err:
+        return auth_err
+
     try:
         query_params = event.get('queryStringParameters') or {}
         window = query_params.get('window', '7d')

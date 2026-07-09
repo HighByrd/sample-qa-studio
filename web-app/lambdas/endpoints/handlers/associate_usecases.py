@@ -49,17 +49,6 @@ def _add_usecases(table, app_id: str, usecase_ids: list, environment: str) -> Di
                 'environment': environment,
             })
 
-    for usecase_id in usecase_ids:
-        try:
-            table.update_item(
-                Key={'pk': 'USECASES', 'sk': f'USECASE#{usecase_id}'},
-                UpdateExpression='SET application_id = :app_id',
-                ExpressionAttributeValues={':app_id': app_id},
-                ConditionExpression='attribute_exists(pk)',
-            )
-        except Exception:
-            logger.warning(f"Could not set application_id on usecase {usecase_id}")
-
     table.update_item(
         Key={'pk': f'APPLICATION#{app_id}', 'sk': 'METADATA'},
         UpdateExpression='ADD usecase_count :count',

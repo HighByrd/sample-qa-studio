@@ -198,6 +198,193 @@ class TestHandlerGroupScopeResolution:
         assert "api/usecases.read" in scope_str
 
 
+class TestTeamRolesAndIsAdminContext:
+    """Tests for teamRoles and isAdmin in the authorizer context."""
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_user_with_team_groups_gets_team_roles_context(self, mock_decode):
+        mock_decode.return_value = _make_access_token_claims(
+            email="user@example.com",
+            groups=["team-alpha-editor", "team-beta-viewer"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+
+        # teamRoles should be a JSON array
+        team_roles = json.loads(context["teamRoles"])
+        assert len(team_roles) == 2
+        team_ids = [tr["team_id"] for tr in team_roles]
+        assert "alpha" in team_ids
+        assert "beta" in team_ids
+
+        # Not admin
+        assert context["isAdmin"] == "false"
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_admin_user_gets_is_admin_true(self, mock_decode):
+        mock_decode.return_value = _make_access_token_claims(
+            email="admin@example.com",
+            groups=["admins"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        assert context["isAdmin"] == "true"
+        # admins is a legacy group — no team_id, so teamRoles is empty
+        team_roles = json.loads(context["teamRoles"])
+        assert team_roles == []
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_legacy_users_group_no_team_roles(self, mock_decode):
+        mock_decode.return_value = _make_access_token_claims(
+            email="user@example.com",
+            groups=["users"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        team_roles = json.loads(context["teamRoles"])
+        assert team_roles == []
+        assert context["isAdmin"] == "false"
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_multi_team_groups_all_included(self, mock_decode):
+        mock_decode.return_value = _make_access_token_claims(
+            email="lead@example.com",
+            groups=["team-alpha-team_lead", "team-beta-editor", "team-gamma-viewer"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        team_roles = json.loads(context["teamRoles"])
+        assert len(team_roles) == 3
+        roles = {tr["team_id"]: tr["role"] for tr in team_roles}
+        assert roles["alpha"] == "team_lead"
+        assert roles["beta"] == "editor"
+        assert roles["gamma"] == "viewer"
+
+
+class TestAuthHardeningEdgeCases:
+    """Auth hardening tests for Bolt 3a — edge cases in group/team resolution."""
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_user_with_five_plus_team_groups_all_parsed(self, mock_decode):
+        """User with 5+ team groups → all parsed correctly."""
+        mock_decode.return_value = _make_access_token_claims(
+            email="power@example.com",
+            groups=[
+                "team-alpha-admin",
+                "team-beta-editor",
+                "team-gamma-executor",
+                "team-delta-viewer",
+                "team-epsilon-team_lead",
+                "team-zeta-editor",
+            ],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        team_roles = json.loads(context["teamRoles"])
+
+        assert len(team_roles) == 6
+        team_ids = {tr["team_id"] for tr in team_roles}
+        assert team_ids == {"alpha", "beta", "gamma", "delta", "epsilon", "zeta"}
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_mix_of_valid_and_invalid_groups(self, mock_decode):
+        """Mix of valid + invalid group names → invalid silently skipped."""
+        mock_decode.return_value = _make_access_token_claims(
+            email="mixed@example.com",
+            groups=[
+                "team-alpha-editor",
+                "invalid-format-group",
+                "team-beta-viewer",
+                "another-bad-one",
+                "",
+                "team-gamma-invalid_role",  # valid format but invalid role
+            ],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        team_roles = json.loads(context["teamRoles"])
+
+        # Only the two valid team groups should appear
+        assert len(team_roles) == 2
+        assert {tr["team_id"] for tr in team_roles} == {"alpha", "beta"}
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_empty_groups_list(self, mock_decode):
+        """Empty groups list → teamRoles=[], isAdmin=false."""
+        mock_decode.return_value = _make_access_token_claims(
+            email="empty@example.com",
+            groups=[],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        team_roles = json.loads(context["teamRoles"])
+        assert team_roles == []
+        assert context["isAdmin"] == "false"
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_m2m_token_no_groups_preserves_behavior(self, mock_decode):
+        """M2M token (no groups) → existing behavior preserved, no team context."""
+        mock_decode.return_value = _make_access_token_claims(
+            client_id="m2m-client-id",
+            scope="api/executions.write",
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+
+        result = handler(event, None)
+        context = result["context"]
+        # M2M tokens should NOT have teamRoles or isAdmin
+        # (they are only set for user identity_type)
+        team_roles = json.loads(context.get("teamRoles", "[]"))
+        assert team_roles == []
+        assert context.get("isAdmin", "false") == "false"
+
+
 class TestGeneratePolicy:
     """Tests for the generate_policy helper."""
 

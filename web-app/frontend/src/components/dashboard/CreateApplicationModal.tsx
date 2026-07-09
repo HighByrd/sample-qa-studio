@@ -6,10 +6,12 @@ import Button from '@cloudscape-design/components/button';
 import FormField from '@cloudscape-design/components/form-field';
 import Input from '@cloudscape-design/components/input';
 import Textarea from '@cloudscape-design/components/textarea';
+import Select, { SelectProps } from '@cloudscape-design/components/select';
 import TokenGroup from '@cloudscape-design/components/token-group';
 import Alert from '@cloudscape-design/components/alert';
 import { Application } from '../../types/application';
 import { api } from '../../utils/api';
+import { usePermissions } from '../../auth';
 
 interface CreateApplicationModalProps {
   visible: boolean;
@@ -19,27 +21,56 @@ interface CreateApplicationModalProps {
 }
 
 export function CreateApplicationModal({ visible, onDismiss, onSuccess, editApplication }: CreateApplicationModalProps) {
+  const { isAdmin, teams: userTeams } = usePermissions();
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [description, setDescription] = useState('');
-  const [team, setTeam] = useState('');
+  const [selectedTeam, setSelectedTeam] = useState<SelectProps.Option | null>(null);
+  const [teamOptions, setTeamOptions] = useState<SelectProps.Option[]>([]);
   const [environments, setEnvironments] = useState<string[]>([]);
   const [envInput, setEnvInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (visible) {
+      if (isAdmin) {
+        api.get('teams').then((data: any) => {
+          const teams = data.teams || data || [];
+          setTeamOptions(teams.map((t: any) => ({ label: t.name, value: t.id })));
+        }).catch(() => setTeamOptions([]));
+      } else {
+        // Non-admin: fetch their team details to get the name
+        const teamIds = userTeams.map((t: any) => t.team_id);
+        Promise.all(
+          teamIds.map((id: string) => api.get(`teams/${encodeURIComponent(id)}`).catch(() => null))
+        ).then((results) => {
+          const opts = results
+            .filter(Boolean)
+            .map((t: any) => ({ label: t.name, value: t.id }));
+          setTeamOptions(opts);
+          if (opts.length === 1 && !editApplication) {
+            setSelectedTeam(opts[0]);
+          }
+        });
+      }
+    }
+  }, [visible, isAdmin, userTeams]);
+
+  useEffect(() => {
     if (editApplication) {
       setName(editApplication.name);
       setBaseUrl(editApplication.base_url);
       setDescription(editApplication.description);
-      setTeam(editApplication.team);
+      const ownerTeamId = (editApplication as any).owner_team_id || '';
+      const teamName = (editApplication as any).team || '';
+      setSelectedTeam(ownerTeamId ? { label: teamName || ownerTeamId, value: ownerTeamId } : null);
       setEnvironments(editApplication.environments || []);
     } else {
       setName('');
       setBaseUrl('');
       setDescription('');
-      setTeam('');
+      setSelectedTeam(null);
       setEnvironments([]);
     }
     setError('');
@@ -59,7 +90,7 @@ export function CreateApplicationModal({ visible, onDismiss, onSuccess, editAppl
     setError('');
 
     try {
-      const payload = { name, base_url: baseUrl, description, team, environments };
+      const payload = { name, base_url: baseUrl, description, team: selectedTeam?.label || '', teamId: selectedTeam?.value || '', environments };
 
       if (editApplication) {
         await api.patch(`applications/${editApplication.id}`, payload);
@@ -115,8 +146,14 @@ export function CreateApplicationModal({ visible, onDismiss, onSuccess, editAppl
           <Textarea value={description} onChange={({ detail }) => setDescription(detail.value)} placeholder="Optional description" />
         </FormField>
 
-        <FormField label="Team">
-          <Input value={team} onChange={({ detail }) => setTeam(detail.value)} placeholder="Team name" />
+        <FormField label="Team" description="Assign this application to a team for access control">
+          <Select
+            selectedOption={selectedTeam}
+            onChange={({ detail }) => setSelectedTeam(detail.selectedOption)}
+            options={teamOptions}
+            placeholder="Select a team (optional)"
+            empty="No teams available"
+          />
         </FormField>
 
         <FormField label="Environments">

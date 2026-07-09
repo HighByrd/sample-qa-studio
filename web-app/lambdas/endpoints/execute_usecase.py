@@ -164,6 +164,22 @@ def handler(event, context):
         
         usecase = usecase_result['Item']
         print(usecase)
+
+        # Resource-level authorization: check execute access on the usecase's app
+        # Skip for scheduler-triggered executions (already authenticated via IAM)
+        exec_app_id = usecase.get('application_id', {}).get('S', '')
+        if exec_app_id and user_identity.get('identity_type') != 'scheduler':
+            from resource_auth import authorize_resource
+            # owner_team_id from the already-loaded use case → no app read.
+            # Only pass a real value; omit otherwise so it falls back to a read.
+            owner_val = (usecase.get('owner_team_id') or {}).get('S', '')
+            auth_kwargs = {}
+            if owner_val:
+                auth_kwargs['owner_team_id'] = owner_val
+            _, auth_err = authorize_resource(event, exec_app_id, 'execute', **auth_kwargs)
+            if auth_err:
+                return auth_err
+
         starting_url = usecase.get('starting_url', {}).get('S', '')
         # Get executing_region from usecase, use default if empty or missing
         region = usecase.get('executing_region', {}).get('S', '').strip()

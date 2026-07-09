@@ -29,6 +29,8 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     app_id = generate_uuid7()
     now = get_current_timestamp()
 
+    team_id = body.get('teamId', '').strip()
+
     application = {
         'pk': f'APPLICATION#{app_id}',
         'sk': 'METADATA',
@@ -37,6 +39,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         'base_url': base_url,
         'description': body.get('description', ''),
         'team': body.get('team', ''),
+        'owner_team_id': team_id,
         'environments': body.get('environments', []),
         'created_at': now,
         'updated_at': now,
@@ -45,6 +48,13 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         'last_execution_at': '',
         'usecase_count': 0,
     }
+
+    # GSI2 projection so the app resolves via OWNERTEAM#{team_id} queries
+    # (list_team_apps, delete_team orphaning, etc.). Only set when a team is
+    # assigned at creation time.
+    if team_id:
+        application['gsi2pk'] = f'OWNERTEAM#{team_id}'
+        application['gsi2sk'] = f'APP#{app_id}'
 
     index_record = {
         'pk': 'APPLICATIONS',

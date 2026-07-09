@@ -17,6 +17,11 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if error:
         return error
 
+    from resource_auth import authorize_resource
+    _, auth_err = authorize_resource(event, app_id, 'view')
+    if auth_err:
+        return auth_err
+
     try:
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(get_table_name())

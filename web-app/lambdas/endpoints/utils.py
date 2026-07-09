@@ -167,6 +167,16 @@ def extract_user_identity(event: dict) -> dict:
     # Parse scopes (space-separated string)
     scopes = scope.split() if scope else []
     
+    # Parse team context from authorizer (added by permissions feature)
+    team_roles_raw = claims.get('teamRoles', '[]')
+    try:
+        team_roles = json.loads(team_roles_raw) if isinstance(team_roles_raw, str) else []
+    except (json.JSONDecodeError, TypeError):
+        team_roles = []
+
+    is_admin_raw = claims.get('isAdmin', 'false')
+    is_admin = is_admin_raw == 'true' if isinstance(is_admin_raw, str) else False
+
     # Use identity_type from authorizer if available
     if identity_type == 'client':
         result = {
@@ -184,7 +194,9 @@ def extract_user_identity(event: dict) -> dict:
             'identity_type': 'user',
             'sub': sub,
             'email': email,
-            'scopes': scopes  # Include scopes for user tokens too
+            'scopes': scopes,  # Include scopes for user tokens too
+            'team_roles': team_roles,
+            'is_admin': is_admin,
         }
         logging.info(f"Identified as USER: {result}")
         return result
@@ -209,7 +221,9 @@ def extract_user_identity(event: dict) -> dict:
             'identity_type': 'user',
             'sub': sub,
             'email': email,
-            'scopes': scopes  # Include scopes for user tokens too
+            'scopes': scopes,  # Include scopes for user tokens too
+            'team_roles': team_roles,
+            'is_admin': is_admin,
         }
         logging.info(f"Fallback identified as USER: {result}")
         return result

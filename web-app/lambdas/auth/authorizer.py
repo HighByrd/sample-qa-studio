@@ -12,6 +12,8 @@ import urllib.request
 import urllib.parse
 from urllib.error import URLError
 
+from role_scopes import scopes_for_groups, parse_group, is_admin_group
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -19,11 +21,8 @@ logger.setLevel(logging.INFO)
 # Cache for JWKS
 jwks_cache = None
 
-# Group-to-scope mapping for user access tokens.
-# Cognito Lite tier does not include resource server scopes in the access token's
-# scope claim for authorization code flow (user tokens). We resolve scopes from
-# cognito:groups instead, which is present in the access token.
-# This mapping must stay in sync with pre_token_generation.py SCOPE_MAPPINGS.
+# Backward-compatibility alias — existing tests import GROUP_SCOPE_MAPPINGS.
+# This is kept as a read-only constant; the actual resolution uses role_scopes.
 GROUP_SCOPE_MAPPINGS = {
     'users': [
         'api/usecases.read',
@@ -37,6 +36,8 @@ GROUP_SCOPE_MAPPINGS = {
         'api/suite.write',
         'api/oauth-clients.read',
         'api/oauth-clients.write',
+        'api/applications.read',
+        'api/applications.write',
     ],
     'admins': [
         'api/usecases.read',
@@ -50,6 +51,9 @@ GROUP_SCOPE_MAPPINGS = {
         'api/suite.write',
         'api/oauth-clients.read',
         'api/oauth-clients.write',
+        'api/applications.read',
+        'api/applications.write',
+        'api/teams.manage',
         'api/admin',
     ],
 }
@@ -59,18 +63,38 @@ def resolve_scopes_from_groups(groups: list) -> set:
     """
     Resolve OAuth scopes from Cognito group membership.
 
+    Delegates to the shared role_scopes module which is the single source of truth.
+
     Args:
         groups: List of Cognito group names from the cognito:groups claim.
 
     Returns:
         Set of scope strings derived from group membership.
     """
-    scopes = set()
+    return scopes_for_groups(groups)
+
+
+def resolve_team_context(groups: list) -> list:
+    """
+    Extract team membership context from Cognito groups.
+
+    Parses each group name and returns a list of dicts describing the user's
+    team memberships and roles.
+
+    Args:
+        groups: List of Cognito group names from the cognito:groups claim.
+
+    Returns:
+        List of dicts with keys: 'team_id', 'role', 'group_name'.
+        Only includes entries where team_id is not None (team groups).
+    """
+    team_roles = []
     for group in groups:
         group_name = group.strip() if isinstance(group, str) else str(group)
-        if group_name in GROUP_SCOPE_MAPPINGS:
-            scopes.update(GROUP_SCOPE_MAPPINGS[group_name])
-    return scopes
+        parsed = parse_group(group_name)
+        if parsed and parsed['team_id'] is not None:
+            team_roles.append(parsed)
+    return team_roles
 
 # Import JWT libraries — fail closed if not available
 try:
@@ -291,6 +315,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             # Cognito Lite tier does not put resource server scopes in the
             # access token's scope claim for authorization code flow, so we
             # derive them from group membership instead.
+            team_roles = []
+            is_admin = False
             if identity_type == 'user' and cognito_groups:
                 group_scopes = resolve_scopes_from_groups(cognito_groups)
                 # Merge with any scopes already in the token
@@ -298,9 +324,14 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 all_scopes = existing_scopes | group_scopes
                 scope = ' '.join(sorted(all_scopes))
                 logger.info(f"Resolved scopes from groups {cognito_groups}: {group_scopes}")
-            
+
+                # Resolve team context for downstream handlers
+                team_roles = resolve_team_context(cognito_groups)
+                is_admin = any(is_admin_group(g.strip() if isinstance(g, str) else str(g)) for g in cognito_groups)
+                logger.info(f"Team roles: {team_roles}, isAdmin: {is_admin}")
+
             logger.info(f"Authorized: {principal_id} (type: {identity_type}, scopes: {scope})")
-            
+
             # Generate allow policy with context
             # Note: All context values must be strings for API Gateway
             policy = generate_policy(
@@ -314,7 +345,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     'clientId': str(client_id or ''),
                     'email': str(email or ''),
                     'username': str(username or ''),
-                    'scope': str(scope)
+                    'scope': str(scope),
+                    'teamRoles': json.dumps(team_roles),
+                    'isAdmin': str(is_admin).lower(),
                 }
             )
             

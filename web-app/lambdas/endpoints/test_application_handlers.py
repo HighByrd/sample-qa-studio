@@ -34,6 +34,7 @@ def _build_event(method="GET", resource="/applications", path_params=None, body=
                 "email": "test@test.com",
                 "identity_type": "user",
                 "scope": "api/admin",
+                "isAdmin": "true",
             }
         },
     }
@@ -806,6 +807,144 @@ class TestGetApplicationFlaky(unittest.TestCase):
             method="GET",
             resource="/applications/{id}/flaky",
             path_params={"id": "app-001"},
+        )
+        response = handle(event)
+
+        self.assertEqual(response["statusCode"], 200)
+        body = json.loads(response["body"])
+        self.assertEqual(body, [])
+
+
+# =============================================================================
+# list_applications team-scoping tests
+# =============================================================================
+
+
+def _build_event_with_team_context(team_roles=None, is_admin="false", scopes="api/admin"):
+    """Build event with team context in the authorizer."""
+    return {
+        "httpMethod": "GET",
+        "resource": "/applications",
+        "pathParameters": {},
+        "queryStringParameters": None,
+        "body": None,
+        "requestContext": {
+            "authorizer": {
+                "email": "test@test.com",
+                "identityType": "user",
+                "scope": scopes,
+                "teamRoles": json.dumps(team_roles or []),
+                "isAdmin": is_admin,
+            }
+        },
+    }
+
+
+class TestListApplicationsTeamScoping(unittest.TestCase):
+    """Tests for team-based filtering in list_applications."""
+
+    @patch("handlers.list_applications.boto3")
+    @patch("handlers.list_applications.get_table_name", return_value="test-table")
+    def test_admin_sees_all_applications(self, mock_table_name, mock_boto3):
+        from handlers.list_applications import handle
+
+        mock_table = MagicMock()
+        mock_boto3.resource.return_value.Table.return_value = mock_table
+
+        mock_table.query.return_value = {
+            "Items": [
+                {"pk": "APPLICATIONS", "sk": "APPLICATION#app-001", "id": "app-001"},
+                {"pk": "APPLICATIONS", "sk": "APPLICATION#app-002", "id": "app-002"},
+            ]
+        }
+
+        mock_boto3.resource.return_value.batch_get_item.return_value = {
+            "Responses": {
+                "test-table": [
+                    {"pk": "APPLICATION#app-001", "sk": "METADATA", "id": "app-001", "name": "App One", "team": "alpha"},
+                    {"pk": "APPLICATION#app-002", "sk": "METADATA", "id": "app-002", "name": "App Two", "team": "beta"},
+                ]
+            }
+        }
+
+        event = _build_event_with_team_context(is_admin="true")
+        response = handle(event)
+
+        self.assertEqual(response["statusCode"], 200)
+        body = json.loads(response["body"])
+        self.assertEqual(len(body), 2)
+        # Admin apps should all have source=owned
+        for app in body:
+            self.assertEqual(app["source"], "owned")
+
+    @patch("handlers.list_applications.boto3")
+    @patch("handlers.list_applications.get_table_name", return_value="test-table")
+    def test_team_member_sees_filtered_applications(self, mock_table_name, mock_boto3):
+        from handlers.list_applications import handle
+
+        mock_table = MagicMock()
+        mock_boto3.resource.return_value.Table.return_value = mock_table
+
+        mock_table.query.return_value = {
+            "Items": [
+                {"pk": "APPLICATIONS", "sk": "APPLICATION#app-001", "id": "app-001"},
+                {"pk": "APPLICATIONS", "sk": "APPLICATION#app-002", "id": "app-002"},
+                {"pk": "APPLICATIONS", "sk": "APPLICATION#app-003", "id": "app-003"},
+            ]
+        }
+
+        mock_boto3.resource.return_value.batch_get_item.return_value = {
+            "Responses": {
+                "test-table": [
+                    {"pk": "APPLICATION#app-001", "sk": "METADATA", "id": "app-001", "name": "Alpha App", "team": "alpha"},
+                    {"pk": "APPLICATION#app-002", "sk": "METADATA", "id": "app-002", "name": "Beta App", "team": "beta"},
+                    {"pk": "APPLICATION#app-003", "sk": "METADATA", "id": "app-003", "name": "Gamma App", "team": "gamma"},
+                ]
+            }
+        }
+
+        # User belongs to team-alpha-editor only
+        team_roles = [{"team_id": "alpha", "role": "editor", "group_name": "team-alpha-editor"}]
+        event = _build_event_with_team_context(
+            team_roles=team_roles,
+            is_admin="false",
+            scopes="api/applications.read api/usecases.read",
+        )
+        response = handle(event)
+
+        self.assertEqual(response["statusCode"], 200)
+        body = json.loads(response["body"])
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["id"], "app-001")
+        self.assertEqual(body[0]["source"], "owned")
+
+    @patch("handlers.list_applications.boto3")
+    @patch("handlers.list_applications.get_table_name", return_value="test-table")
+    def test_unassigned_user_gets_empty_list(self, mock_table_name, mock_boto3):
+        from handlers.list_applications import handle
+
+        mock_table = MagicMock()
+        mock_boto3.resource.return_value.Table.return_value = mock_table
+
+        mock_table.query.return_value = {
+            "Items": [
+                {"pk": "APPLICATIONS", "sk": "APPLICATION#app-001", "id": "app-001"},
+            ]
+        }
+
+        mock_boto3.resource.return_value.batch_get_item.return_value = {
+            "Responses": {
+                "test-table": [
+                    {"pk": "APPLICATION#app-001", "sk": "METADATA", "id": "app-001", "name": "Some App", "team": "alpha"},
+                ]
+            }
+        }
+
+        # No team roles
+        event = _build_event_with_team_context(
+            team_roles=[],
+            is_admin="false",
+            scopes="api/applications.read",
         )
         response = handle(event)
 

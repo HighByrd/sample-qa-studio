@@ -69,8 +69,25 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'success': False,
                 'message': 'Source usecase not found'
             })
-        
+
         source_usecase = source_response['Item']
+
+        # Resource-level authorization: check edit access on the source usecase's app
+        source_app_id = source_usecase.get('application_id', '')
+        if source_app_id:
+            from resource_auth import authorize_resource
+            cb_response = table.get_item(
+                Key={'pk': f'USECASE#{source_id}', 'sk': 'CREATED_BY'}
+            )
+            created_by_sub = cb_response.get('Item', {}).get('sub', '')
+            # owner_team_id from the already-loaded source use case → no app read.
+            # Omit when absent (older records) so it falls back to reading the app.
+            auth_kwargs = {'created_by': created_by_sub}
+            if source_usecase.get('owner_team_id'):
+                auth_kwargs['owner_team_id'] = source_usecase['owner_team_id']
+            _, auth_err = authorize_resource(event, source_app_id, 'edit', **auth_kwargs)
+            if auth_err:
+                return auth_err
         
         # Generate new usecase ID
         new_usecase_id = str(uuid4())

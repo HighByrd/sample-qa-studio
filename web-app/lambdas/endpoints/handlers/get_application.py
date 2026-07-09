@@ -25,6 +25,17 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if not item:
         return create_response(404, {'error': 'Application not found'})
 
+    # Resource-level authorization: caller must have view access to this app.
+    # Pass owner from the item we already loaded — no extra read. Omit when
+    # absent so authorize_resource resolves it (identical orphaned-app result).
+    from resource_auth import authorize_resource
+    auth_kwargs = {}
+    if item.get('owner_team_id'):
+        auth_kwargs['owner_team_id'] = item['owner_team_id']
+    _, auth_err = authorize_resource(event, app_id, 'view', **auth_kwargs)
+    if auth_err:
+        return auth_err
+
     item.pop('pk', None)
     item.pop('sk', None)
     return create_response(200, item)

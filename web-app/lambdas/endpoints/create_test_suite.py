@@ -118,6 +118,23 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return create_response(400, {'error': 'application_id is required'})
         suite_item['application_id'] = application_id
 
+        # Resource-level authorization: caller must have edit access to the app
+        from resource_auth import authorize_resource
+        _, auth_err = authorize_resource(event, application_id, 'edit')
+        if auth_err:
+            return auth_err
+
+        # Set owner_team_id from the parent app's team ownership
+        try:
+            app_record = table.get_item(Key={'pk': f'APPLICATION#{application_id}', 'sk': 'METADATA'}).get('Item', {})
+            owner_team_id = app_record.get('owner_team_id', '')
+            if owner_team_id:
+                suite_item['owner_team_id'] = owner_team_id
+            else:
+                logger.warning(f"Application {application_id} has no owner_team_id set")
+        except Exception as e:
+            logger.error(f"Failed to read app {application_id} for owner_team_id: {e}")
+
         # Write to DynamoDB
         table.put_item(Item=suite_item)
 

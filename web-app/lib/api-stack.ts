@@ -391,14 +391,16 @@ export class NovaActQAStudioApiStack extends NovaActQAStudioBaseStack {
     const wizardRecording = this.addResource(wizardSession, 'recording')
     this.addMethod(wizardRecording, HttpMethod.GET, props.getRecordingDataLambda)
 
-    // /users - User management
+    // /users - User management (router for GET/POST, legacy Lambdas for per-user ops)
     const users = this.addResource(this.api.root, 'users')
-    this.addMethod(users, HttpMethod.GET, props.listUsersLambda)
-    this.addMethod(users, HttpMethod.POST, props.addUserLambda)
+    this.addMethod(users, HttpMethod.GET, l.applicationRouterLambda)
+    this.addMethod(users, HttpMethod.POST, l.applicationRouterLambda)
 
+    // /users/{username} - Per-user operations (legacy + new PATCH for role updates)
     const user = this.addResource(users, '{username}')
     this.addMethod(user, HttpMethod.GET, props.getUserLambda)
     this.addMethod(user, HttpMethod.DELETE, props.removeUserLambda)
+    this.addMethod(user, HttpMethod.PATCH, l.applicationRouterLambda)
 
     const userGroups = this.addResource(user, 'groups')
     this.addMethod(userGroups, HttpMethod.PUT, props.updateUserGroupsLambda)
@@ -498,36 +500,35 @@ export class NovaActQAStudioApiStack extends NovaActQAStudioBaseStack {
     const suiteSchedule = this.addResource(testSuite, 'schedule')
     this.addMethod(suiteSchedule, HttpMethod.PUT, l.updateSuiteScheduleLambda)
 
-    // /applications - Application management (router Lambda)
+    // /teams - Team management (uses application router Lambda with proxy)
+    const teams = this.addResource(this.api.root, 'teams')
+    this.addMethod(teams, HttpMethod.GET, l.applicationRouterLambda)
+    this.addMethod(teams, HttpMethod.POST, l.applicationRouterLambda)
+
+    // /teams/{proxy+} - All nested team paths handled by router
+    const teamsProxy = teams.addProxy({
+      anyMethod: false,
+      defaultIntegration: new LambdaIntegration(l.applicationRouterLambda),
+    })
+    teamsProxy.addMethod('ANY', new LambdaIntegration(l.applicationRouterLambda), {
+      authorizer: this.authorizer,
+      authorizationType: AuthorizationType.CUSTOM
+    })
+
+    // /applications - Application management (router Lambda with proxy)
     const applications = this.addResource(this.api.root, 'applications')
     this.addMethod(applications, HttpMethod.GET, l.applicationRouterLambda)
     this.addMethod(applications, HttpMethod.POST, l.applicationRouterLambda)
 
-    // /applications/{id} - Get, update, delete application
-    const application = this.addResource(applications, '{id}')
-    this.addMethod(application, HttpMethod.GET, l.applicationRouterLambda)
-    this.addMethod(application, HttpMethod.PATCH, l.applicationRouterLambda)
-    this.addMethod(application, HttpMethod.DELETE, l.applicationRouterLambda)
-
-    // /applications/{id}/usecases - Associate usecases
-    const applicationUsecases = this.addResource(application, 'usecases')
-    this.addMethod(applicationUsecases, HttpMethod.POST, l.applicationRouterLambda)
-
-    // /applications/{id}/usecases/{usecaseId} - Remove association
-    const applicationUsecase = this.addResource(applicationUsecases, '{usecaseId}')
-    this.addMethod(applicationUsecase, HttpMethod.DELETE, l.applicationRouterLambda)
-
-    // /applications/{id}/metrics - Get metrics
-    const applicationMetrics = this.addResource(application, 'metrics')
-    this.addMethod(applicationMetrics, HttpMethod.GET, l.applicationRouterLambda)
-
-    // /applications/{id}/failures - Get failures
-    const applicationFailures = this.addResource(application, 'failures')
-    this.addMethod(applicationFailures, HttpMethod.GET, l.applicationRouterLambda)
-
-    // /applications/{id}/flaky - Get flaky usecases
-    const applicationFlaky = this.addResource(application, 'flaky')
-    this.addMethod(applicationFlaky, HttpMethod.GET, l.applicationRouterLambda)
+    // /applications/{proxy+} - All nested application paths handled by router
+    const applicationsProxy = applications.addProxy({
+      anyMethod: false,
+      defaultIntegration: new LambdaIntegration(l.applicationRouterLambda),
+    })
+    applicationsProxy.addMethod('ANY', new LambdaIntegration(l.applicationRouterLambda), {
+      authorizer: this.authorizer,
+      authorizationType: AuthorizationType.CUSTOM
+    })
 
     // /dashboard/overview - Dashboard overview
     const dashboard = this.addResource(this.api.root, 'dashboard')
