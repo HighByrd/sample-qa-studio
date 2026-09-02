@@ -21,6 +21,7 @@ import { Topic } from 'aws-cdk-lib/aws-sns';
 import { AwsCustomResource, AwsCustomResourcePolicy, PhysicalResourceId } from 'aws-cdk-lib/custom-resources';
 import { NovaActQAStudioBaseStack, NovaActQAStudioBaseStackCreateProps } from './base-stack';
 import { loadConfig } from './config';
+import { resolveAgentCoreAzNames } from './agentcore-az';
 
 const config = loadConfig();
 const { defaultRegion, enabledRegions, vpcId, workerSecurityGroupId, createVpcEndpoints, agentCoreVPC } = config;
@@ -353,6 +354,16 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
     // VPC Configuration: Use existing VPC or create new one
     let shouldCreateVpcEndpoints: boolean;
 
+    // When AgentCore browsers are attached to a VPC, they can only run in
+    // specific Availability Zones (see agentcore-az.ts). Resolve the set of
+    // supported AZ *names* for this account/region up front so we can (a) pin
+    // a created VPC's subnets to supported zones, and (b) validate that an
+    // imported VPC actually has a subnet in a supported zone. Only resolved on
+    // the VPC path so non-VPC deploys stay env-agnostic (no synth-time AWS call).
+    const agentCoreAzNames = agentCoreVPC
+      ? resolveAgentCoreAzNames(process.env.CDK_DEFAULT_REGION || defaultRegion)
+      : undefined;
+
     if (vpcId) {
       // Use existing VPC - automatically discovers subnets
       this.vpc = Vpc.fromLookup(this, 'existing-vpc', {
@@ -364,19 +375,51 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
         throw new Error(`Existing VPC ${vpcId} must have at least one private subnet with NAT Gateway for ECS tasks and AgentCore browsers`);
       }
 
+      // When VPC-attaching AgentCore browsers, the imported VPC must have at
+      // least one private subnet in an AgentCore-supported AZ — otherwise
+      // browser creation fails at runtime and can't be fixed without changing
+      // the VPC's subnets. Fail fast at synth with an actionable message.
+      if (agentCoreAzNames) {
+        const supportedSubnets = this.vpc.privateSubnets.filter((s) =>
+          agentCoreAzNames.includes(s.availabilityZone),
+        );
+        if (supportedSubnets.length === 0) {
+          const vpcAzs = this.vpc.privateSubnets.map((s) => s.availabilityZone);
+          throw new Error(
+            `agentCoreVPC is enabled but imported VPC ${vpcId} has no private ` +
+              `subnet in an AgentCore-supported Availability Zone. ` +
+              `VPC private-subnet AZs: ${vpcAzs.join(', ') || '(none)'}. ` +
+              `AgentCore-supported AZs in this region: ${agentCoreAzNames.join(', ')}. ` +
+              `Add a private subnet (with NAT Gateway internet access) in one of ` +
+              `the supported AZs.`,
+          );
+        }
+      }
+
       // Only create VPC endpoints if explicitly requested for existing VPC
       shouldCreateVpcEndpoints = createVpcEndpoints ?? false;
     } else {
-      // Create new VPC with default configuration
+      // Create new VPC. When AgentCore VPC mode is on, pin the VPC's subnets to
+      // AgentCore-supported AZs (one NAT Gateway per AZ for internet access);
+      // otherwise fall back to the default two-AZ layout.
       this.vpc = new Vpc(this, 'vpc', {
         vpcName: this.cdkName('vpc'),
-        maxAzs: 2,
-        natGateways: 2,
+        ...(agentCoreAzNames
+          ? { availabilityZones: agentCoreAzNames, natGateways: Math.min(agentCoreAzNames.length, 2) }
+          : { maxAzs: 2, natGateways: 2 }),
       });
 
       // Always create VPC endpoints for new VPC
       shouldCreateVpcEndpoints = true;
     }
+
+    // Choose a private subnet in an AgentCore-supported AZ to hand to the
+    // browser. For a created VPC every private subnet already qualifies (we
+    // pinned the AZs above); for an imported VPC we pick the first supported
+    // one (validated to exist above).
+    const agentCoreSubnet = agentCoreAzNames
+      ? this.vpc.privateSubnets.find((s) => agentCoreAzNames.includes(s.availabilityZone))!
+      : this.vpc.privateSubnets[0];
 
     // Create VPC endpoints if needed
     if (shouldCreateVpcEndpoints) {
@@ -483,7 +526,7 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
       // VPC configuration for AgentCore browsers
       AGENT_CORE_VPC: 'true',
       AC_VPC_ID: this.vpc.vpcId,
-      AC_SUBNET_ID: this.vpc.privateSubnets[0].subnetId,
+      AC_SUBNET_ID: agentCoreSubnet.subnetId,
       AC_SECURITY_GROUP_ID: this.workerSecurityGroup.securityGroupId,
     } : baseEnvironment;
 
@@ -761,6 +804,26 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
             `arn:aws:bedrock-agentcore:${Aws.REGION}:${Aws.ACCOUNT_ID}:browser-custom/*`,
             `arn:aws:bedrock-agentcore:${Aws.REGION}:${Aws.ACCOUNT_ID}:browser-session/*`
           ]
+        }),
+        // Allow creation of the AgentCore network service-linked role. This is
+        // required the first time an AgentCore browser is attached to a VPC —
+        // AgentCore uses this SLR to manage the ENIs it places in your subnets.
+        // Without it, CreateBrowser fails with:
+        //   "Failed creating service linked role. Please verify that the calling
+        //    role has sufficient permissions to create a service linked role."
+        // Scoped to the AgentCore network service via the iam:AWSServiceName
+        // condition, matching the nova-act SLR statement above.
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ['iam:CreateServiceLinkedRole'],
+          resources: [
+            'arn:aws:iam::*:role/aws-service-role/network.bedrock-agentcore.amazonaws.com/*'
+          ],
+          conditions: {
+            StringLike: {
+              'iam:AWSServiceName': 'network.bedrock-agentcore.amazonaws.com'
+            }
+          }
         })
       ]
     }));

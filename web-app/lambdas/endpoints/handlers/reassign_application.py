@@ -55,8 +55,14 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     # Get current owner
     previous_owner = permissions_repo.get_app_owner(app_id)
 
-    # Reassign
+    # Reassign the app itself...
     permissions_repo.set_app_owner(app_id, target_team_id)
+
+    # ...then cascade ownership to the app's use cases and test suites so the
+    # new team can actually see them. Without this, resources added while the
+    # app was unowned/owned-by-another-team stay invisible to the new team —
+    # the failure mode when migrating orphan use cases into a team.
+    cascade = permissions_repo.set_app_resources_owner(app_id, target_team_id)
 
     # Audit log
     actor = {'sub': user_identity.get('sub', ''), 'email': user_identity.get('email', '')}
@@ -64,12 +70,22 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         actor=actor,
         action='app_reassign',
         target={'app_id': app_id},
-        details={'previous_team_id': previous_owner or '', 'new_team_id': target_team_id},
+        details={
+            'previous_team_id': previous_owner or '',
+            'new_team_id': target_team_id,
+            'reassigned_usecases': cascade.get('usecases', 0),
+            'reassigned_suites': cascade.get('suites', 0),
+        },
     )
 
-    logger.info(f"Reassigned application {app_id} from {previous_owner} to {target_team_id}")
+    logger.info(
+        f"Reassigned application {app_id} from {previous_owner} to {target_team_id} "
+        f"(cascaded {cascade})"
+    )
     return create_response(200, {
         'appId': app_id,
         'targetTeamId': target_team_id,
         'previousTeamId': previous_owner or '',
+        'reassignedUsecases': cascade.get('usecases', 0),
+        'reassignedSuites': cascade.get('suites', 0),
     })

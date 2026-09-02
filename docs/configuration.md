@@ -89,6 +89,23 @@ To deploy into an existing VPC:
 
 When `vpcId` is set, CDK uses explicit account/region from your AWS environment. The security group must allow outbound HTTPS (443) for AWS API access.
 
+### AgentCore browsers in a VPC (`agentCoreVPC: true`)
+
+When `agentCoreVPC` is enabled, AgentCore browsers are attached to the VPC. AgentCore only supports VPC connectivity in **specific Availability Zones per region**, identified by **AZ ID** (e.g. `use1-az1`), not AZ name (e.g. `us-east-1a`) — and the AZ ID→name mapping differs per AWS account. To prevent browser-creation failures in unsupported zones, the worker stack resolves supported AZs at synth time and:
+
+- **Created VPC** (`vpcId` unset): pins the VPC's subnets to the supported AZs (capped at two NAT Gateways).
+- **Existing VPC** (`vpcId` set): validates that at least one private subnet is in a supported AZ and fails the deploy with an actionable message otherwise.
+
+Because `agentCoreVPC: true` triggers an `ec2:DescribeAvailabilityZones` call during `cdk synth`, synth then requires AWS credentials for the target account/region (your deploy pipeline already provides these). Non-VPC deploys are unaffected.
+
+> **Maintainer note — keep the supported-AZ table current.** AWS publishes the AgentCore-supported AZ IDs only in documentation (there is no API for the list), so they are hardcoded per region in [`web-app/lib/agentcore-az.ts`](../web-app/lib/agentcore-az.ts) (`AGENTCORE_SUPPORTED_AZ_IDS`). If AWS adds a region or changes the supported zones, update that table from the [AgentCore VPC documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html). Deploying `agentCoreVPC: true` into a region that is missing from the table fails synth with a clear error pointing back to the doc.
+
+To find the AZ ID of a subnet:
+
+```bash
+aws ec2 describe-subnets --subnet-ids subnet-12345678 --query 'Subnets[0].AvailabilityZoneId'
+```
+
 
 ## Mobile Testing (Device Farm)
 

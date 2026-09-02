@@ -277,18 +277,33 @@ This guide helps you diagnose and resolve common issues when using QA Studio.
 **Symptoms**:
 - API requests return 403
 - "Missing required scopes" error
+- CLI returns `403 Insufficient permissions.` with **no error detail**
 
 **Solutions**:
 
-1. **Check user permissions**:
+1. **Check that `api_url` includes the `/api` base path** (most common cause of a
+   detail-less 403 from the CLI):
+   - Your `api_url` must end with `/api` — for example
+     `https://<api-id>.execute-api.<region>.amazonaws.com/api/` or
+     `https://<cloudfront-domain>/api`.
+   - If you omit `/api` (e.g. the bare CloudFront URL), requests route to the
+     web-app origin instead of the API and return a bodyless 403 that the CLI
+     renders as `403 Insufficient permissions.` with no further detail.
+   - Check and fix with:
+     ```bash
+     qa-studio status          # inspect the configured API URL
+     qa-studio configure       # re-enter it with the /api suffix
+     ```
+
+2. **Check user permissions**:
    - Verify user has access to the resource
    - Check Cognito group memberships
 
-2. **Verify OAuth scopes**:
+3. **Verify OAuth scopes**:
    - For CLI: User must have appropriate permissions
    - For API clients: Client must have required scopes
 
-3. **Contact administrator**:
+4. **Contact administrator**:
    - Request access to the resource
    - Or create new OAuth client with correct scopes
 

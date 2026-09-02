@@ -560,6 +560,56 @@ def set_app_owner(app_id: str, team_id: str) -> dict:
     return response.get('Attributes', {})
 
 
+def set_app_resources_owner(app_id: str, team_id: str) -> dict:
+    """
+    Propagate an application's owning team to its associated use cases and
+    test suites (all items whose ``application_id`` equals ``app_id``).
+
+    Called on app reassignment. Team-scoped visibility keys off
+    ``owner_team_id`` on the use case / suite, so without this cascade a team
+    granted a reassigned app still couldn't see resources that were added while
+    the app was unowned or owned by a different team (the migration case).
+
+    Args:
+        app_id: Application ID whose resources should be re-owned.
+        team_id: New owning team ID to stamp onto the resources.
+
+    Returns:
+        Dict with counts of updated resources: {'usecases': int, 'suites': int}.
+    """
+    table = _get_table()
+    counts = {'usecases': 0, 'suites': 0}
+
+    def _reassign(list_pk: str, sk_prefix: str, counter_key: str) -> None:
+        last_key = None
+        while True:
+            query_kwargs = {
+                'KeyConditionExpression': Key('pk').eq(list_pk) & Key('sk').begins_with(sk_prefix),
+            }
+            if last_key:
+                query_kwargs['ExclusiveStartKey'] = last_key
+            response = table.query(**query_kwargs)
+            for item in response.get('Items', []):
+                if item.get('application_id') == app_id:
+                    table.update_item(
+                        Key={'pk': item['pk'], 'sk': item['sk']},
+                        UpdateExpression='SET owner_team_id = :tid',
+                        ExpressionAttributeValues={':tid': team_id},
+                    )
+                    counts[counter_key] += 1
+            last_key = response.get('LastEvaluatedKey')
+            if not last_key:
+                break
+
+    _reassign('USECASES', 'USECASE#', 'usecases')
+    _reassign('TEST_SUITES', 'SUITE#', 'suites')
+
+    logger.info(
+        f"Propagated owner_team_id={team_id} to app {app_id} resources: {counts}"
+    )
+    return counts
+
+
 def get_app_owner(app_id: str) -> Optional[str]:
     """
     Get the owning team ID for an application.

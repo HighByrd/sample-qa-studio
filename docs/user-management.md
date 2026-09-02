@@ -20,7 +20,9 @@ Every team member has one of five roles, from most to least privileged:
 | **Executor** | Run (execute) use cases and test suites. Cannot create or modify them. |
 | **Viewer** | Read-only access to their team's apps, use cases, and results. |
 
-**Important:** Admin is a studio-wide role. A user with Admin role in any team has full access to the entire system, not just that team.
+**Important:** Admin is a studio-wide, *teamless* role — not a per-team assignment. When you create a user with the Admin role, QA Studio places them in the global `admins` Cognito group and ignores any team selection. A user with Admin has full access to the entire system, regardless of team membership. The other four roles (Team Lead, Editor, Executor, Viewer) are always scoped to a specific team.
+
+Roles are cumulative: each role inherits every permission of the roles below it (Team Lead ⊇ Editor ⊇ Executor ⊇ Viewer). This matters for feature visibility — for example, because Editor carries the OAuth client permissions, Team Leads inherit them too.
 
 ### Applications, Use Cases, and Test Suites
 
@@ -112,9 +114,14 @@ Navigate through **Applications** → click your app → manage use cases and te
 | Role | Sidebar items |
 |------|--------------|
 | Admin | Dashboard, Applications, Use Cases, Test Suites, Templates, Teams, Users, OAuth Clients |
-| Team Lead | Dashboard, Applications, Templates, My Team |
-| Editor / Executor / Viewer | Dashboard, Applications, Templates |
+| Team Lead | Dashboard, Applications, Templates, My Team, OAuth Clients |
+| Editor | Dashboard, Applications, Templates, OAuth Clients |
+| Executor / Viewer | Dashboard, Applications, Templates |
 | Unassigned (no team) | Empty dashboard with "Forbidden" — contact admin |
+
+**Notes:**
+- The **Use Cases** and **Test Suites** top-level links are admin-only. Non-admins reach use cases and test suites by navigating into an application.
+- **OAuth Clients** appears for any user with the `api/oauth-clients.read`/`.write` scope — which the Editor role carries and Team Lead inherits — as well as for admins. It is *not* admin-only.
 
 ### Application visibility
 
@@ -133,6 +140,28 @@ Access is inherited from the parent application:
 | Create / edit use cases | Editor or above |
 | Delete use cases | Editor or above (must be creator or Admin) |
 
+#### Creator-retains-edit
+
+There is one exception to the "Editor or above to edit" rule. The user who
+**created** a use case keeps the ability to **edit** it even if their role later
+drops below Editor (for example, they're moved to Executor or Viewer). This
+override:
+
+- grants **edit only** — never **delete**, and
+- applies **only while the creator is still a member of the owning team**.
+
+If the creator leaves the team, the override no longer applies. Admins always
+bypass this logic.
+
+#### Per-test-case visibility overrides
+
+Individual use cases can carry an optional visibility override that **narrows**
+who can see them within a team. An override restricts visibility to a specific
+set of users (`allowed_subs`) and/or roles (`allowed_roles`). Overrides can only
+*reduce* access — they never grant more than a user's team membership already
+provides. Admins bypass overrides and can always see the use case. If no
+override is set, standard role-based access applies.
+
 ### Shared Access
 
 Teams can grant other teams access to their applications:
@@ -142,6 +171,22 @@ Teams can grant other teams access to their applications:
 3. Select the target team and access level (View, Execute, or Full)
 
 The **ceiling rule** applies: a user's effective permission on a shared app = min(their_role_permissions, shared_access_level). For example, a Viewer accessing an app shared with "Full (edit)" access remains view-only.
+
+You cannot share an application with the team that already owns it — QA Studio rejects a grant where the target team equals the owning team. Sharing is also validated to confirm the application is actually owned by the granting team before the grant is created.
+
+### Safeguards
+
+- **Last-admin guard.** QA Studio tracks a system-wide admin count and refuses to
+  demote the final admin. Attempting to change the last admin's role to a
+  non-admin role fails with "Cannot demote the last admin." This prevents you
+  from locking yourself out of studio-wide administration.
+- **Gap-free role changes.** When a member's role changes, QA Studio adds the new
+  role's Cognito group before removing the old one, so the user never briefly
+  loses access mid-change.
+- **Audit logging.** Permission changes — granting/revoking shared access, role
+  changes, and similar actions — are recorded to an audit log with the actor's
+  identity, the action, and the affected target, so administrative changes are
+  traceable.
 
 ## Unassigned Users
 
@@ -189,3 +234,12 @@ A: Yes — admins can click "Assign to team" on any application's detail page.
 
 **Q: Why does a new user see "Forbidden"?**
 A: They have no team assignment, so they have no scopes. The dashboard API requires `api/applications.read` which they don't have. Add them to a team to grant access.
+
+**Q: Can I make someone an Admin of just one team?**
+A: No. Admin is studio-wide and teamless. Granting Admin gives access to everything, regardless of team. If you want the highest team-scoped role, use Team Lead.
+
+**Q: I can't demote our only admin — why?**
+A: The last-admin guard blocks demoting the final admin so the studio can't be left without administration. Promote another user to Admin first, then demote the original.
+
+**Q: A Viewer/Executor can still edit one use case — is that a bug?**
+A: Probably not. The user who created a use case keeps edit (not delete) access to it even below Editor, as long as they remain in the owning team. See [Creator-retains-edit](#creator-retains-edit).

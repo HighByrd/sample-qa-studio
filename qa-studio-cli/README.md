@@ -183,6 +183,17 @@ In `--format json` mode, all prompts are suppressed and output is a single JSON 
 
 Running `qa-studio configure` stores settings in `~/.qa-studio/config.json`.
 
+> **Important — `api_url` must include the `/api` base path.** The value must
+> point at the API, ending in `/api`. Either host works:
+>
+> - API Gateway invoke URL: `https://<api-id>.execute-api.<region>.amazonaws.com/api/`
+> - CloudFront domain: `https://<cloudfront-domain>/api`
+>
+> If you leave off `/api` (for example, using the bare CloudFront URL
+> `https://<cloudfront-domain>`), requests route to the web-app origin instead
+> of the API and fail with a confusing `403` that has no error detail. Verify
+> your setting with `qa-studio status`.
+
 You can override any config value with environment variables:
 
 | Environment Variable         | Overrides              | Description |
@@ -229,7 +240,7 @@ Or add them to `~/.qa-studio/config.json`:
 
 ```json
 {
-  "api_url": "https://your-api-url",
+  "api_url": "https://your-api-host/api",
   "cognito_domain": "https://your-cognito-domain.auth.region.amazoncognito.com",
   "client_id": "your-public-client-id",
   "oauth_client_id": "your-m2m-client-id",
