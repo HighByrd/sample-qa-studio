@@ -404,8 +404,11 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
       // otherwise fall back to the default two-AZ layout.
       this.vpc = new Vpc(this, 'vpc', {
         vpcName: this.cdkName('vpc'),
+        // Pin to the first two supported AZs (AgentCore recommends >= 2). Two
+        // AZs matches the previous default footprint and the NAT cap, keeping
+        // the created VPC small and avoiding a third-AZ expansion.
         ...(agentCoreAzNames
-          ? { availabilityZones: agentCoreAzNames, natGateways: Math.min(agentCoreAzNames.length, 2) }
+          ? { availabilityZones: agentCoreAzNames.slice(0, 2), natGateways: 2 }
           : { maxAzs: 2, natGateways: 2 }),
       });
 

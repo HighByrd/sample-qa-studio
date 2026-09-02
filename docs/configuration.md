@@ -93,7 +93,7 @@ When `vpcId` is set, CDK uses explicit account/region from your AWS environment.
 
 When `agentCoreVPC` is enabled, AgentCore browsers are attached to the VPC. AgentCore only supports VPC connectivity in **specific Availability Zones per region**, identified by **AZ ID** (e.g. `use1-az1`), not AZ name (e.g. `us-east-1a`) — and the AZ ID→name mapping differs per AWS account. To prevent browser-creation failures in unsupported zones, the worker stack resolves supported AZs at synth time and:
 
-- **Created VPC** (`vpcId` unset): pins the VPC's subnets to the supported AZs (capped at two NAT Gateways).
+- **Created VPC** (`vpcId` unset): pins the VPC's subnets to two supported AZs (two NAT Gateways). Because this sets the VPC's Availability Zones, it should be enabled on a **fresh** deployment — turning it on for an already-created VPC forces CloudFormation to re-lay-out (replace) existing subnets, which fails with CIDR conflicts. For an existing VPC, either deploy a fresh stack or use an imported VPC (`vpcId`).
 - **Existing VPC** (`vpcId` set): validates that at least one private subnet is in a supported AZ and fails the deploy with an actionable message otherwise.
 
 Because `agentCoreVPC: true` triggers an `ec2:DescribeAvailabilityZones` call during `cdk synth`, synth then requires AWS credentials for the target account/region (your deploy pipeline already provides these). Non-VPC deploys are unaffected.
