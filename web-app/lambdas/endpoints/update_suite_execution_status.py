@@ -50,7 +50,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if error_response:
         return error_response
 
-    print(f"Suite execution status update requested by: {user_identity['identity']} (type: {user_identity['identity_type']})")
+    print(f"Suite execution status update requested by identity type: {user_identity['identity_type']}")
 
     # Parse path parameters
     suite_id, error = validate_path_id(event.get('pathParameters', {}).get('suite_id'), 'suite ID')

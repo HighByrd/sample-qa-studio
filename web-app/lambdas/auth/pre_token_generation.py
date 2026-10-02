@@ -67,8 +67,10 @@ def handler(event, context):
     """
     try:
         logger.info(f"=== PRE-TOKEN GENERATION V2 TRIGGERED ===")
-        logger.info(f"Full event: {json.dumps(event, default=str)}")
-        logger.info(f"User: {event.get('userName')}")
+        # The event carries user attributes (email, name, phone): log only
+        # the opaque sub and the trigger source.
+        user_sub = (event.get('request', {}).get('userAttributes') or {}).get('sub')
+        logger.info(f"User sub: {user_sub}")
         logger.info(f"Trigger source: {event.get('triggerSource')}")
         
         # Extract user groups from the event
@@ -83,7 +85,6 @@ def handler(event, context):
         # Fallback: check userAttributes for cognito:groups
         if not groups:
             user_attributes = request.get('userAttributes', {})
-            logger.info(f"User attributes: {json.dumps(user_attributes, default=str)}")
             
             # cognito:groups might be a list or comma-separated string
             cognito_groups = user_attributes.get('cognito:groups', [])

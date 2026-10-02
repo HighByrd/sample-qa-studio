@@ -479,6 +479,20 @@ qa-studio run --usecase-id test-123 --verbose
 - Click on task → Logs tab
 - View CloudWatch logs
 
+### What logs never contain
+
+Logs are designed to be safe to share. Even in debug mode:
+
+| Source | Never logged | Logged instead |
+|---|---|---|
+| CLI runner (console, `logs.txt`, `suite_logs.txt`) | API response bodies, resolved secret values, bearer tokens/JWTs, STS session tokens, SigV4 signatures | Response status and size; masked values appear as `***` |
+| CLI runner — AWS SDK / HTTP libraries (`botocore`, `boto3`, `urllib3`, `s3transfer`) | Anything below `WARNING` | Warnings and errors only |
+| API Lambdas | Raw API Gateway events (headers, `Authorization`, request bodies) | `request_log_summary`: method, resource, path/query parameter *names*, request ID, caller `sub` or client ID, body size |
+| Lambda authorizer / pre-token trigger | Tokens, decoded claims, email, username | Token use, `sub` / client ID, groups, resolved scopes |
+| Worker secrets client | Secret values and full secret paths | Secret key name and error type |
+
+If you need full HTTP traces for a CLI issue, reproduce it locally against a test use case with throwaway secrets.
+
 ### Common Log Patterns
 
 **Successful Execution**:

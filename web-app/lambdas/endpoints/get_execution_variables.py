@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict, List
 import boto3
-from utils import create_response, get_table_name, require_scopes, validate_path_id
+from utils import create_response, get_table_name, require_scopes, validate_path_id, request_log_summary
 
 # Configure logging
 logger = logging.getLogger()
@@ -25,7 +25,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if error:
             return error
         
-        logger.info(f"Request: {event}")
+        logger.info(f"Received request: {request_log_summary(event)}")
         
         # Get parameters from path
         execution_id, error = validate_path_id(event.get('pathParameters', {}).get('executionId'), 'execution ID')

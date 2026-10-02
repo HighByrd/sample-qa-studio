@@ -168,6 +168,18 @@ Store sensitive values like passwords, API keys, or tokens. Secrets are:
 
 To add a secret, provide a key name and the secret value. You can delete secrets you no longer need.
 
+**Using a secret in a step.** A secret step runs in two phases. First, the agent performs the step's instruction (it never sees the secret). Then the secret value is typed into whichever element has keyboard focus. It does not press Enter. Write the instruction so it only focuses the target field:
+
+| Instruction | Result |
+|---|---|
+| `Click into the password field.` | Works: the field is focused, then the secret is typed into it |
+| `Search` | Fails: the agent reads the appended success prompt as text to search for, then the secret is typed after the page has changed |
+| `Type the password and press Enter` | Fails: the agent types its own text and submits before the secret is typed |
+
+To submit the form, add a separate navigation step after the secret step (for example `Press Enter.` or `Click the Sign in button.`).
+
+Secret values are masked as `***` in execution logs and are never written to CloudWatch.
+
 #### Headers
 Configure custom HTTP headers that should be sent with requests during test execution. Useful for authentication tokens, custom identifiers, or API keys that your application requires.
 

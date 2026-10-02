@@ -124,7 +124,9 @@ class ApiClient:
             logger.warning("Transient error, will retry: %s", e)
             raise _RetryableError(ApiError(0, f"Connection error: {e}"))
 
-        logger.debug("← %s %s", response.status_code, response.text[:500])
+        # Never log response bodies: endpoints such as
+        # /usecase/{id}/secrets/{key}/value return decrypted secrets.
+        logger.debug("← %s (%d bytes)", response.status_code, len(response.content or b""))
 
         if not response.ok:
             if response.status_code in RETRYABLE_STATUS_CODES:

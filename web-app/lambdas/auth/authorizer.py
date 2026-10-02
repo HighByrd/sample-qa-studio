@@ -245,7 +245,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         IAM policy allowing or denying access
     """
     try:
-        logger.info(f"Authorizer invoked with event: {json.dumps(event)}")
+        # Never log the event: authorizationToken is the caller's bearer token.
+        logger.info(f"Authorizer invoked: type={event.get('type')} methodArn={event.get('methodArn')}")
         
         # Extract token from Authorization header
         token = event.get('authorizationToken', '')
@@ -257,8 +258,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Remove 'Bearer ' prefix if present
         if token.startswith('Bearer '):
             token = token[7:]
-        
-        logger.info(f"Token extracted (first 20 chars): {token[:20]}...")
         
         # Get environment variables
         region = os.environ.get('AWS_REGION', 'us-east-1')
@@ -275,7 +274,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.info("Starting token validation...")
             # Decode and verify token with signature verification
             decoded_token = decode_and_verify_token(token, region, user_pool_id)
-            logger.info(f"Token decoded successfully: {json.dumps(decoded_token, default=str)}")
+            # Claims include email/username (PII); log only opaque identifiers.
+            logger.info(f"Token verified: token_use={decoded_token.get('token_use')} sub={decoded_token.get('sub')}")
             
             # Verify token use
             token_use = decoded_token.get('token_use')
@@ -291,7 +291,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             scope = decoded_token.get('scope', '')
             cognito_groups = decoded_token.get('cognito:groups', [])
             
-            logger.info(f"Token claims - email: {email}, username: {username}, client_id: {client_id}, scope: '{scope}', groups: {cognito_groups}")
+            logger.info(f"Token claims - sub: {sub}, client_id: {client_id}, scope: '{scope}', groups: {cognito_groups}")
             
             # Determine identity type
             if email:
@@ -330,7 +330,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 is_admin = any(is_admin_group(g.strip() if isinstance(g, str) else str(g)) for g in cognito_groups)
                 logger.info(f"Team roles: {team_roles}, isAdmin: {is_admin}")
 
-            logger.info(f"Authorized: {principal_id} (type: {identity_type}, scopes: {scope})")
+            # principal_id is the email for user tokens, so log sub/client_id instead.
+            logger.info(f"Authorized: {sub or client_id} (type: {identity_type}, scopes: {scope})")
 
             # Generate allow policy with context
             # Note: All context values must be strings for API Gateway

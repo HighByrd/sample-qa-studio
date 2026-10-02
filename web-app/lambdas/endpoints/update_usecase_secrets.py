@@ -3,7 +3,7 @@ import json
 from typing import Any, Dict
 import boto3
 from botocore.exceptions import ClientError
-from utils import create_response, get_secret_prefix, require_scopes, validate_path_id
+from utils import create_response, get_secret_prefix, require_scopes, validate_path_id, request_log_summary
 
 # Configure logging
 logger = logging.getLogger()
@@ -27,7 +27,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if error_response:
             return error_response
         
-        logger.info(f"Received request: {event}")
+        logger.info(f"Received request: {request_log_summary(event)}")
         
         # Get usecase ID from path
         path_params = event.get('pathParameters', {})

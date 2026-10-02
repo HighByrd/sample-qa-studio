@@ -59,7 +59,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.error(f"Error deleting secret {secret_name}: {str(e)}")
             return create_response(500, {'error': f'Failed to delete secret {secret_key}'})
         
-        logger.info(f"Successfully deleted secret {secret_name}")
+        logger.info(f"Successfully deleted secret {secret_key} for usecase {usecase_id}")
         
         return create_response(200, {
             'message': 'Secret deleted successfully',

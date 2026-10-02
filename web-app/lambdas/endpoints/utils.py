@@ -423,6 +423,32 @@ def create_response(status_code: int, body: Any, cors: bool = True) -> dict:
     }
 
 
+def request_log_summary(event: dict) -> str:
+    """
+    Build a log-safe one-line summary of an API Gateway proxy event.
+
+    Never log the raw event: it carries the caller's bearer token in
+    ``headers.Authorization`` and request bodies that can contain secret
+    values (e.g. POST /usecase/{id}/secrets). Only routing metadata and
+    the caller's opaque identifiers are included here.
+    """
+    event = event or {}
+    ctx = event.get('requestContext') or {}
+    authorizer = ctx.get('authorizer') or {}
+    body = event.get('body')
+    return (
+        f"method={event.get('httpMethod')} "
+        f"resource={event.get('resource')} "
+        f"path_params={sorted((event.get('pathParameters') or {}).keys())} "
+        f"query_params={sorted((event.get('queryStringParameters') or {}).keys())} "
+        f"request_id={ctx.get('requestId')} "
+        # sub / clientId are opaque IDs; principalId and email are not logged
+        # because principalId is the user's email for user tokens.
+        f"caller={authorizer.get('sub') or authorizer.get('clientId') or None} "
+        f"body_bytes={len(body) if isinstance(body, str) else 0}"
+    )
+
+
 # User journey validation utilities
 from urllib.parse import urlparse
 

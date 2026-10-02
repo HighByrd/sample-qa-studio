@@ -70,7 +70,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         except client.exceptions.UsernameExistsException:
             return create_response(400, {'error': 'User with this email already exists'})
         except Exception as e:
-            logger.error(f"Failed to create Cognito user {email}: {e}")
+            logger.error(f"Failed to create Cognito user: {e}")
             return create_response(500, {'error': 'Failed to create user'})
         cognito_user = response.get('User', {})
         user_sub = cognito_user.get('Username', '')
@@ -116,7 +116,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     except client.exceptions.UsernameExistsException:
         return create_response(400, {'error': 'User with this email already exists'})
     except Exception as e:
-        logger.error(f"Failed to create Cognito user {email}: {e}")
+        logger.error(f"Failed to create Cognito user: {e}")
         return create_response(500, {'error': 'Failed to create user'})
 
     # Extract the sub from the created user
@@ -176,5 +176,5 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         'teams': teams,
     }
 
-    logger.info(f"Created user {email} (sub={actual_sub})")
+    logger.info(f"Created user sub={actual_sub}")
     return create_response(201, response_body)
