@@ -744,47 +744,25 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
       }));
     }
 
-    // Add Secrets Manager permissions to execution role
-    this.taskDefinition.executionRole!.attachInlinePolicy(new Policy(this, 'ecr_access_policy', {
-      statements: [
-        new PolicyStatement({
-          effect: Effect.ALLOW,
-          actions: [
-            'secretsmanager:GetSecretValue',
-          ],
-          resources: [
-            `arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:*`,
-          ]
-        }),
-      ]
-    }));
-
-    this.taskDefinition.executionRole!.attachInlinePolicy(new Policy(this, 'secrets_manager_policy', {
-      statements: [
-        new PolicyStatement({
-          effect: Effect.ALLOW,
-          actions: [
-            'secretsmanager:GetSecretValue',
-            'secretsmanager:ListSecrets',
-          ],
-          resources: [`arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:*`]
-        })
-      ]
-    }));
-
+    // Secrets Manager access.
+    // - Execution role: only needs the worker M2M credentials secret, which
+    //   ECS injects as OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET. CDK grants that
+    //   automatically via EcsSecret.fromSecretsManager, so no extra policy.
+    // - Task role: the Nova Act API key (used when USE_NOVA_ACT_GA=false) and
+    //   this deployment's use case secrets (`${baseName}/usecase/...`). The
+    //   trailing `*` covers the 6-character random ARN suffix.
     this.taskDefinition.taskRole!.attachInlinePolicy(new Policy(this, 'task_role_secrets_manager_policy', {
       statements: [
         new PolicyStatement({
           effect: Effect.ALLOW,
-          actions: [
-            'secretsmanager:GetSecretValue',
-            'secretsmanager:ListSecrets',
-          ],
-          resources: [`arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:*`]
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [
+            props.novaActApiKeySecret.secretArn,
+            `arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:${this.baseName}/usecase/*`,
+          ]
         })
       ]
     }));
-
     this.taskDefinition.taskRole!.attachInlinePolicy(new Policy(this, 'task_role_bedrock_agentscore', {
       statements: [
         new PolicyStatement({
@@ -831,9 +809,35 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
       ]
     }));
 
-    // Device Farm permissions for mobile testing (Device Farm is only available in us-west-2)
+    // Device Farm permissions for mobile testing (Device Farm is only available in us-west-2).
+    // The project is either supplied per use case / DEVICE_FARM_PROJECT_ARN or
+    // auto-discovered (first project in the account, created if none exists),
+    // so sessions, uploads and projects are scoped to this account's
+    // us-west-2 resources rather than a single project ARN.
+    const deviceFarmArn = (type: string, account: string = this.account) =>
+      `arn:aws:devicefarm:us-west-2:${account}:${type}:*`;
     this.taskDefinition.taskRole!.attachInlinePolicy(new Policy(this, 'task_role_device_farm', {
       statements: [
+        // No resource-level permissions for these actions ("*" required).
+        // ListArtifacts is called with a session ARN, which is not one of its
+        // supported resource types (job/run/suite/test).
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: [
+            'devicefarm:ListProjects',
+            'devicefarm:CreateProject',
+            'devicefarm:ListDevices',
+            'devicefarm:ListArtifacts',
+          ],
+          resources: ['*'],
+        }),
+        // Public device catalog (devices have no account in their ARN).
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ['devicefarm:GetDevice', 'devicefarm:CreateRemoteAccessSession'],
+          resources: [deviceFarmArn('device', ''), deviceFarmArn('deviceinstance', '')],
+        }),
+        // Account-owned projects, uploads and sessions.
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
@@ -841,20 +845,14 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
             'devicefarm:GetRemoteAccessSession',
             'devicefarm:StopRemoteAccessSession',
             'devicefarm:DeleteRemoteAccessSession',
-            'devicefarm:ListProjects',
-            'devicefarm:CreateProject',
-            'devicefarm:ListDevices',
-            'devicefarm:GetDevice',
             'devicefarm:CreateUpload',
             'devicefarm:GetUpload',
             'devicefarm:ListUploads',
-            'devicefarm:ListArtifacts',
           ],
-          resources: ['*'],
+          resources: [deviceFarmArn('project'), deviceFarmArn('upload'), deviceFarmArn('session')],
         }),
       ],
     }));
-
     this.schedulerGroup = new CfnScheduleGroup(this, 'schedule_group', {
       name: this.cdkName('schedules')
     });

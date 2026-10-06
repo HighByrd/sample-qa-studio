@@ -163,7 +163,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         missing_secrets = []
         for secret in secrets_data:
             secret_key = secret.get('key', '')
-            secret_name = f"{get_secret_prefix()}/{new_usecase_id}/{secret_key}"
+            # Same path and tag as create_usecase_secrets so the secret can be
+            # listed, resolved at runtime, and matches the IAM scope.
+            secret_name = f"{get_secret_prefix()}/usecase/{new_usecase_id}/{secret_key}"
             
             # Save secret info to DynamoDB
             secret_item = {
@@ -185,7 +187,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 secrets_client.create_secret(
                     Name=secret_name,
                     Description=f"Imported secret: {secret.get('description', '')}",
-                    SecretString=''  # Empty value - needs to be configured
+                    SecretString='',  # Empty value - needs to be configured
+                    Tags=[
+                        {'Key': 'usecase_id', 'Value': new_usecase_id},
+                        {'Key': 'managed_by', 'Value': get_secret_prefix()},
+                    ],
                 )
             except Exception as e:
                 logger.error(f"Error creating secret in AWS: {str(e)}")

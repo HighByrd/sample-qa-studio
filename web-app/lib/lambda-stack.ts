@@ -1215,14 +1215,19 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
     }))
 
     // Secrets Manager Permissions
-    // Note: Secrets Manager ARNs have a 6-character random suffix, so we use a wildcard pattern
-    const secretsArnPattern = `arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:${props.baseName}*`;
+    // Use case secrets are always named `${baseName}/usecase/<usecaseId>/<key>`
+    // (see SECRET_PREFIX). Scope every secret action to that path so these
+    // Lambdas cannot touch other secrets such as `${baseName}-worker-m2m-credentials`
+    // or `${baseName}-nova-api-key`. The trailing `*` covers the 6-character
+    // random suffix Secrets Manager appends to ARNs.
+    const secretsArnPattern = `arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:${props.baseName}/usecase/*`;
     
-    // CreateSecret requires * for resource (ARN unknown before creation), scoped to account
+    // CreateSecret and TagResource support resource-level permissions on the
+    // requested secret name, so they are scoped like every other action.
     this.createUsecaseSecretsLambda.addToRolePolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ['secretsmanager:CreateSecret', 'secretsmanager:TagResource'],
-      resources: [`arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:*`]
+      resources: [secretsArnPattern]
     }))
     
     this.createUsecaseSecretsLambda.addToRolePolicy(new PolicyStatement({
@@ -1264,11 +1269,17 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       resources: [secretsArnPattern]
     }))
 
-    // ListSecrets and CreateSecret require * for resource, scoped to account
+    // ListSecrets does not support resource-level permissions ("*" required).
     this.cloneUsecaseLambda.addToRolePolicy(new PolicyStatement({
       effect: Effect.ALLOW,
-      actions: ['secretsmanager:ListSecrets', 'secretsmanager:CreateSecret', 'secretsmanager:TagResource'],
-      resources: [`*`]
+      actions: ['secretsmanager:ListSecrets'],
+      resources: ['*']
+    }))
+
+    this.cloneUsecaseLambda.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ['secretsmanager:CreateSecret', 'secretsmanager:TagResource'],
+      resources: [secretsArnPattern]
     }))
 
     // ListSecrets requires * for resource, scoped to account
@@ -1312,11 +1323,10 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       resources: ['*']
     }))
 
-    // CreateSecret requires * for resource, scoped to account
     this.importUsecaseLambda.addToRolePolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: ['secretsmanager:CreateSecret', 'secretsmanager:TagResource'],
-      resources: [`arn:aws:secretsmanager:${Aws.REGION}:${Aws.ACCOUNT_ID}:secret:*`]
+      resources: [secretsArnPattern]
     }))
     
     this.importUsecaseLambda.addToRolePolicy(new PolicyStatement({
