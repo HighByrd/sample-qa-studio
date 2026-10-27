@@ -4,23 +4,21 @@ import os
 import logging
 from typing import Any, Dict
 import boto3
-from utils import create_response, require_scopes, extract_user_identity, validate_path_id
+from utils import create_response, extract_user_identity, validate_path_id
 import permissions_repo
+from resource_auth import require_team_role, validate_team_role
 import cognito_sync
 from perm_audit import log_permission_change
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Valid team roles
-_VALID_ROLES = {'admin', 'team_lead', 'editor', 'executor', 'viewer'}
-
 
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     """
     Add a member to a team.
 
-    Requires api/admin scope OR caller must be team-lead/admin of the target team.
+    Requires api/admin scope OR caller must be team lead of the target team.
     Implements the membership mutation saga:
       1. permissions_repo.add_membership (DynamoDB)
       2. cognito_sync.set_user_role (Cognito — adds to group)
@@ -40,22 +38,11 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         500: Saga failure (compensated)
     """
     # Auth: admin or team-lead of this team
-    user_identity, error_response = require_scopes(event, ['api/admin'])
-    if error_response:
-        # Not admin — check if caller is team-lead of the target team
-        identity = extract_user_identity(event)
-        if identity.get('is_admin'):
-            user_identity = identity
-        else:
-            team_id_raw = (event.get('pathParameters') or {}).get('id', '')
-            team_roles = identity.get('team_roles', [])
-            is_team_lead = any(
-                tr.get('team_id') == team_id_raw and tr.get('role') in ('admin', 'team_lead')
-                for tr in team_roles
-            )
-            if not is_team_lead:
-                return create_response(403, {'error': 'Admin or team lead required'})
-            user_identity = identity
+    user_identity = extract_user_identity(event)
+    team_id_raw = (event.get('pathParameters') or {}).get('id', '')
+    auth_error = require_team_role(user_identity, team_id_raw, 'team_lead', 'Admin or team lead required')
+    if auth_error:
+        return auth_error
 
     team_id, error = validate_path_id(
         (event.get('pathParameters') or {}).get('id'), 'team ID'
@@ -81,8 +68,9 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         return create_response(400, {'error': 'userId is required'})
     if not role:
         return create_response(400, {'error': 'role is required'})
-    if role not in _VALID_ROLES:
-        return create_response(400, {'error': f'Invalid role. Must be one of: {", ".join(sorted(_VALID_ROLES))}'})
+    role_error = validate_team_role(role)
+    if role_error:
+        return role_error
 
     # Resolve email to Cognito sub and username
     user_sub = user_input
@@ -112,10 +100,6 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     # SAGA Step 1: Write membership to DynamoDB (system of record)
     membership = permissions_repo.add_membership(team_id, user_sub, role)
 
-    # Update admin counter if adding an admin
-    if role == 'admin':
-        permissions_repo._increment_admin_count()
-
     # SAGA Step 2: Sync to Cognito (projection)
     user_pool_id = os.environ.get('USER_POOL_ID', '')
     if user_pool_id:
@@ -123,11 +107,9 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
             _add_user_to_team_group(cognito_username, team_id, role, user_pool_id)
         except Exception as e:
             # Compensate: remove the DynamoDB membership
-            logger.error(f"Cognito sync failed for {user_sub} in team {team_id}: {e}. Compensating.")
+            logger.error(f"Cognito sync failed for team {team_id}: {e}. Compensating.")
             try:
                 permissions_repo.remove_membership(user_sub, team_id)
-                if role == 'admin':
-                    permissions_repo._decrement_admin_count()
             except Exception as comp_err:
                 logger.error(f"Compensation failed: {comp_err}")
             return create_response(500, {'error': 'Failed to sync team membership. Please retry.'})
@@ -148,7 +130,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         'added_at': membership.get('added_at', ''),
     }
 
-    logger.info(f"Added member {user_sub} to team {team_id} as {role}")
+    logger.info(f"Added member to team {team_id} as {role}")
     return create_response(201, response_body)
 
 
@@ -162,4 +144,4 @@ def _add_user_to_team_group(cognito_username: str, team_id: str, role: str, user
         Username=cognito_username,
         GroupName=group_name,
     )
-    logger.info(f"Added user {cognito_username} to Cognito group {group_name}")
+    logger.info(f"Added user to Cognito group {group_name}")

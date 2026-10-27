@@ -5,7 +5,7 @@ import sys
 import json
 import pytest
 import boto3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from moto import mock_aws
 
 os.environ["TABLE_NAME"] = "test-table"
@@ -355,11 +355,8 @@ class TestSetMemberRole:
     """Tests for set_member_role."""
 
     def test_changes_role(self, dynamodb_table):
-        from permissions_repo import (
-            create_team, add_membership, set_member_role, initialize_admin_count
-        )
+        from permissions_repo import create_team, add_membership, set_member_role
 
-        initialize_admin_count(2)
         team = create_team('Team Role', 'admin-sub')
         add_membership(team['id'], 'user-1', 'editor')
 
@@ -375,31 +372,15 @@ class TestSetMemberRole:
         result = set_member_role('user-1', team['id'], 'editor')
         assert result['role'] == 'editor'
 
-    def test_last_admin_guard_rejects_demotion(self, dynamodb_table):
-        from permissions_repo import (
-            create_team, add_membership, set_member_role, initialize_admin_count
-        )
+    def test_legacy_admin_membership_can_be_demoted(self, dynamodb_table):
+        """Team 'admin' memberships are legacy (C-1); demoting one has no counter/guard."""
+        from permissions_repo import create_team, add_membership, set_member_role
 
-        # Initialize with exactly 1 admin
-        initialize_admin_count(1)
-        team = create_team('Team Guard', 'admin-sub')
-        add_membership(team['id'], 'sole-admin', 'admin')
+        team = create_team('Team Legacy', 'admin-sub')
+        add_membership(team['id'], 'legacy-admin', 'admin')
 
-        with pytest.raises(ValueError, match="Cannot demote the last admin"):
-            set_member_role('sole-admin', team['id'], 'editor')
-
-    def test_allows_demotion_when_multiple_admins(self, dynamodb_table):
-        from permissions_repo import (
-            create_team, add_membership, set_member_role, initialize_admin_count
-        )
-
-        initialize_admin_count(2)
-        team = create_team('Team Multi', 'admin-sub')
-        add_membership(team['id'], 'admin-1', 'admin')
-        add_membership(team['id'], 'admin-2', 'admin')
-
-        result = set_member_role('admin-1', team['id'], 'editor')
-        assert result['role'] == 'editor'
+        result = set_member_role('legacy-admin', team['id'], 'team_lead')
+        assert result['role'] == 'team_lead'
 
     def test_raises_key_error_for_missing_membership(self, dynamodb_table):
         from permissions_repo import create_team, set_member_role
@@ -408,19 +389,6 @@ class TestSetMemberRole:
 
         with pytest.raises(KeyError):
             set_member_role('ghost-user', team['id'], 'editor')
-
-    def test_promote_to_admin_increments_counter(self, dynamodb_table):
-        from permissions_repo import (
-            create_team, add_membership, set_member_role,
-            initialize_admin_count, count_admins
-        )
-
-        initialize_admin_count(1)
-        team = create_team('Team Promote', 'admin-sub')
-        add_membership(team['id'], 'user-promote', 'editor')
-
-        set_member_role('user-promote', team['id'], 'admin')
-        assert count_admins() == 2
 
 
 class TestListTeamMembers:
@@ -449,34 +417,23 @@ class TestListTeamMembers:
         assert result == []
 
 
-class TestCountAdmins:
-    """Tests for count_admins and admin counter helpers."""
+class TestAdminCounterRemoved:
+    """The ADMIN_COUNT/GLOBAL counter is gone; the guard uses the 'admins' group."""
 
-    def test_returns_zero_when_no_counter(self, dynamodb_table):
-        from permissions_repo import count_admins
+    def test_counter_helpers_removed(self):
+        import permissions_repo
+        for name in ('count_admins', '_increment_admin_count',
+                     '_decrement_admin_count', 'initialize_admin_count'):
+            assert not hasattr(permissions_repo, name)
 
-        result = count_admins()
-        assert result == 0
+    def test_set_member_role_does_not_write_counter(self, dynamodb_table):
+        from permissions_repo import create_team, add_membership, set_member_role
 
-    def test_returns_initialized_value(self, dynamodb_table):
-        from permissions_repo import initialize_admin_count, count_admins
+        team = create_team('Team Counter', 'admin-sub')
+        add_membership(team['id'], 'u1', 'editor')
+        set_member_role('u1', team['id'], 'viewer')
 
-        initialize_admin_count(5)
-        assert count_admins() == 5
-
-    def test_increment_and_decrement(self, dynamodb_table):
-        from permissions_repo import (
-            initialize_admin_count, count_admins,
-            _increment_admin_count, _decrement_admin_count
-        )
-
-        initialize_admin_count(3)
-        _increment_admin_count()
-        assert count_admins() == 4
-
-        _decrement_admin_count()
-        _decrement_admin_count()
-        assert count_admins() == 2
+        assert 'Item' not in dynamodb_table.get_item(Key={'pk': 'ADMIN_COUNT', 'sk': 'GLOBAL'})
 
 
 # ===========================================================================
@@ -764,3 +721,110 @@ class TestGetTestcaseOverride:
 
         result = get_testcase_override('nonexistent-tc')
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Owner readers (H-2 resolvers)
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerReaders:
+    def test_usecase_owner(self, dynamodb_table):
+        from permissions_repo import get_usecase_owner
+        dynamodb_table.put_item(Item={'pk': 'USECASES', 'sk': 'USECASE#uc-1', 'application_id': 'app-1',
+                                      'owner_team_id': 'team-a', 'name': 'secret-ish', 'starting_url': 'x'})
+        dynamodb_table.put_item(Item={'pk': 'USECASE#uc-1', 'sk': 'CREATED_BY', 'sub': 'creator', 'email': 'e'})
+        assert get_usecase_owner('uc-1') == {'application_id': 'app-1', 'owner_team_id': 'team-a', 'created_by': None}
+        assert get_usecase_owner('uc-1', include_creator=True)['created_by'] == 'creator'
+
+    def test_usecase_owner_missing_and_orphan(self, dynamodb_table):
+        from permissions_repo import get_usecase_owner
+        assert get_usecase_owner('nope') is None
+        dynamodb_table.put_item(Item={'pk': 'USECASES', 'sk': 'USECASE#uc-2', 'application_id': ''})
+        assert get_usecase_owner('uc-2', include_creator=True) == {
+            'application_id': None, 'owner_team_id': None, 'created_by': None}
+
+    def test_suite_owner(self, dynamodb_table):
+        from permissions_repo import get_suite_owner
+        assert get_suite_owner('s-1') is None
+        dynamodb_table.put_item(Item={'pk': 'TEST_SUITES', 'sk': 'SUITE#s-1', 'application_id': 'app-1'})
+        assert get_suite_owner('s-1') == {'application_id': 'app-1', 'owner_team_id': None}
+
+    def test_execution_record_keyed_by_usecase(self, dynamodb_table):
+        from permissions_repo import get_execution_record
+        dynamodb_table.put_item(Item={'pk': 'USECASE_EXECUTION#uc-1', 'sk': 'EXECUTION#ex-1',
+                                      'status': 'running', 'worker_token_hash': 'h', 'suite_id': 's-1',
+                                      'starting_url': 'x'})
+        assert get_execution_record('uc-1', 'ex-1') == {
+            'status': 'running', 'worker_token_hash': 'h', 'suite_id': 's-1', 'suite_execution_id': None}
+        assert get_execution_record('uc-other', 'ex-1') is None
+
+    def test_suite_execution_record(self, dynamodb_table):
+        from permissions_repo import get_suite_execution_record
+        dynamodb_table.put_item(Item={'pk': 'SUITE_EXECUTION#s-1', 'sk': 'EXECUTION#sx-1', 'status': 'pending'})
+        assert get_suite_execution_record('s-1', 'sx-1') == {'status': 'pending'}
+        assert get_suite_execution_record('s-2', 'sx-1') is None
+
+    def test_app_ownership(self, dynamodb_table):
+        from permissions_repo import get_app_ownership
+        assert get_app_ownership('nope') is None
+        dynamodb_table.put_item(Item={'pk': 'APPLICATION#a-1', 'sk': 'METADATA', 'name': 'A'})
+        assert get_app_ownership('a-1') == {'owner_team_id': None}
+
+
+class TestBatchGetTestcaseOverrides:
+    """batch_get_testcase_overrides: BatchGetItem on USECASE#{id}/OVERRIDE (BR-3 lists)."""
+
+    def test_returns_only_existing_overrides(self, dynamodb_table):
+        from permissions_repo import put_testcase_override, batch_get_testcase_overrides
+        put_testcase_override('tc-1', {'allowed_subs': ['s1']})
+        put_testcase_override('tc-3', {'allowed_roles': ['editor']})
+        result = batch_get_testcase_overrides(['tc-1', 'tc-2', 'tc-3', 'tc-1'])
+        assert set(result) == {'tc-1', 'tc-3'}
+        assert result['tc-1']['allowed_subs'] == ['s1']
+        assert result['tc-3']['allowed_roles'] == ['editor']
+
+    def test_more_than_100_ids_are_chunked(self, dynamodb_table):
+        from permissions_repo import put_testcase_override, batch_get_testcase_overrides
+        ids = [f'tc-{i}' for i in range(250)]
+        for tc in ids[::50]:
+            put_testcase_override(tc, {'allowed_subs': ['s']})
+        result = batch_get_testcase_overrides(ids)
+        assert set(result) == set(ids[::50])
+
+    def test_chunk_size_never_exceeds_100(self):
+        from permissions_repo import batch_get_testcase_overrides
+        fake = MagicMock()
+        fake.batch_get_item.return_value = {'Responses': {'test-table': []}}
+        with patch('permissions_repo.boto3.resource', return_value=fake):
+            batch_get_testcase_overrides([f'tc-{i}' for i in range(201)])
+        sizes = [len(c.kwargs['RequestItems']['test-table']['Keys']) for c in fake.batch_get_item.call_args_list]
+        assert sizes == [100, 100, 1]
+
+    def test_empty_input_makes_no_call(self):
+        from permissions_repo import batch_get_testcase_overrides
+        with patch('permissions_repo.boto3.resource') as resource:
+            assert batch_get_testcase_overrides([]) == {}
+        resource.assert_not_called()
+
+    def test_unprocessed_keys_retried(self):
+        from permissions_repo import batch_get_testcase_overrides
+        fake = MagicMock()
+        unprocessed = {'test-table': {'Keys': [{'pk': 'USECASE#tc-2', 'sk': 'OVERRIDE'}]}}
+        fake.batch_get_item.side_effect = [
+            {'Responses': {'test-table': [{'pk': 'USECASE#tc-1', 'sk': 'OVERRIDE'}]}, 'UnprocessedKeys': unprocessed},
+            {'Responses': {'test-table': [{'pk': 'USECASE#tc-2', 'sk': 'OVERRIDE'}]}, 'UnprocessedKeys': {}},
+        ]
+        with patch('permissions_repo.boto3.resource', return_value=fake):
+            result = batch_get_testcase_overrides(['tc-1', 'tc-2'])
+        assert set(result) == {'tc-1', 'tc-2'}
+        assert fake.batch_get_item.call_args_list[1].kwargs['RequestItems'] == unprocessed
+
+    def test_still_unprocessed_after_retries_raises(self):
+        from permissions_repo import batch_get_testcase_overrides
+        fake = MagicMock()
+        unprocessed = {'test-table': {'Keys': [{'pk': 'USECASE#tc-1', 'sk': 'OVERRIDE'}]}}
+        fake.batch_get_item.return_value = {'Responses': {}, 'UnprocessedKeys': unprocessed}
+        with patch('permissions_repo.boto3.resource', return_value=fake):
+            with pytest.raises(RuntimeError):
+                batch_get_testcase_overrides(['tc-1'])

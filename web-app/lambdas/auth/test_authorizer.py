@@ -9,12 +9,25 @@ from unittest.mock import patch, MagicMock
 # Add the auth directory to the path
 sys.path.insert(0, os.path.dirname(__file__))
 
+import authorizer
 from authorizer import (
     GROUP_SCOPE_MAPPINGS,
     resolve_scopes_from_groups,
     handler,
     generate_policy,
 )
+
+
+@pytest.fixture(autouse=True)
+def clients_table(monkeypatch):
+    """No real DynamoDB: every test gets an empty OAUTH_CLIENTS table and a cold cache."""
+    table = MagicMock()
+    table.get_item.return_value = {}
+    monkeypatch.setattr(authorizer, '_get_clients_table', lambda: table)
+    monkeypatch.delenv('WORKER_CLIENT_ID', raising=False)
+    authorizer._client_binding_cache.clear()
+    yield table
+    authorizer._client_binding_cache.clear()
 
 
 class TestGroupScopeMappings:
@@ -246,6 +259,59 @@ class TestTeamRolesAndIsAdminContext:
         assert team_roles == []
 
     @patch("authorizer.decode_and_verify_token")
+    def test_team_admin_group_is_not_admin(self, mock_decode):
+        """A legacy team-x-admin group grants neither isAdmin nor api/admin (C-1)."""
+        mock_decode.return_value = _make_access_token_claims(
+            email="lead@example.com",
+            groups=["team-x-admin"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+        result = handler(event, None)
+        context = result["context"]
+        assert context["isAdmin"] == "false"
+        assert "api/admin" not in context["scope"].split()
+        assert json.loads(context["teamRoles"]) == []
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_team_lead_plus_team_admin_group_is_only_team_lead(self, mock_decode):
+        mock_decode.return_value = _make_access_token_claims(
+            email="lead@example.com",
+            groups=["team-x-team_lead", "team-x-admin"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+        result = handler(event, None)
+        context = result["context"]
+        assert context["isAdmin"] == "false"
+        assert "api/admin" not in context["scope"].split()
+        assert "api/teams.manage" in context["scope"].split()
+        assert json.loads(context["teamRoles"]) == [
+            {"team_id": "x", "role": "team_lead", "group_name": "team-x-team_lead"}
+        ]
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_admins_group_gets_admin_scope(self, mock_decode):
+        mock_decode.return_value = _make_access_token_claims(
+            email="admin@example.com",
+            groups=["admins"],
+        )
+        event = {
+            "authorizationToken": "Bearer fake-token",
+            "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+        }
+        os.environ["USER_POOL_ID"] = "us-east-1_test"
+        result = handler(event, None)
+        assert result["context"]["isAdmin"] == "true"
+        assert "api/admin" in result["context"]["scope"].split()
+
+    @patch("authorizer.decode_and_verify_token")
     def test_legacy_users_group_no_team_roles(self, mock_decode):
         mock_decode.return_value = _make_access_token_claims(
             email="user@example.com",
@@ -294,7 +360,7 @@ class TestAuthHardeningEdgeCases:
         mock_decode.return_value = _make_access_token_claims(
             email="power@example.com",
             groups=[
-                "team-alpha-admin",
+                "team-alpha-viewer",
                 "team-beta-editor",
                 "team-gamma-executor",
                 "team-delta-viewer",
@@ -402,3 +468,98 @@ class TestGeneratePolicy:
         policy = generate_policy("user@test.com", "Allow", "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource")
         resource = policy["policyDocument"]["Statement"][0]["Resource"]
         assert resource.endswith("/*/*")
+
+
+def _m2m_event():
+    os.environ["USER_POOL_ID"] = "us-east-1_test"
+    return {
+        "authorizationToken": "Bearer fake-token",
+        "methodArn": "arn:aws:execute-api:us-east-1:123:api/stage/GET/resource",
+    }
+
+
+class TestClientBinding:
+    """M2M clients get their team binding from OAUTH_CLIENTS (H-2)."""
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_bound_client_gets_team_roles(self, mock_decode, clients_table):
+        mock_decode.return_value = _make_access_token_claims(client_id="ci-client", scope="api/usecases.execute")
+        clients_table.get_item.return_value = {"Item": {"team_id": "team-a", "team_role": "editor"}}
+        context = handler(_m2m_event(), None)["context"]
+        assert context["identityType"] == "client"
+        assert json.loads(context["teamRoles"]) == [{"team_id": "team-a", "role": "editor"}]
+        assert context["isAdmin"] == "false"
+        key = clients_table.get_item.call_args.kwargs["Key"]
+        assert key == {"pk": "OAUTH_CLIENTS", "sk": "ci-client"}
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_missing_binding_emits_empty_team_roles(self, mock_decode, clients_table):
+        mock_decode.return_value = _make_access_token_claims(client_id="legacy-client", scope="api/usecases.read")
+        context = handler(_m2m_event(), None)["context"]
+        assert json.loads(context["teamRoles"]) == []
+        assert result_effect(handler(_m2m_event(), None)) == "Allow"
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_lookup_error_fails_closed_and_is_not_cached(self, mock_decode, clients_table):
+        mock_decode.return_value = _make_access_token_claims(client_id="ci-client", scope="api/usecases.read")
+        clients_table.get_item.side_effect = Exception("throttled")
+        assert json.loads(handler(_m2m_event(), None)["context"]["teamRoles"]) == []
+        clients_table.get_item.side_effect = None
+        clients_table.get_item.return_value = {"Item": {"team_id": "team-a", "team_role": "viewer"}}
+        assert json.loads(handler(_m2m_event(), None)["context"]["teamRoles"]) == [
+            {"team_id": "team-a", "role": "viewer"}]
+
+    @pytest.mark.parametrize("role", ["team_lead", "admin", "owner", None])
+    @patch("authorizer.decode_and_verify_token")
+    def test_disallowed_role_fails_closed(self, mock_decode, role, clients_table):
+        mock_decode.return_value = _make_access_token_claims(client_id="ci-client", scope="api/usecases.read")
+        clients_table.get_item.return_value = {"Item": {"team_id": "team-a", "team_role": role}}
+        assert json.loads(handler(_m2m_event(), None)["context"]["teamRoles"]) == []
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_binding_cached_within_ttl(self, mock_decode, clients_table):
+        mock_decode.return_value = _make_access_token_claims(client_id="ci-client", scope="api/usecases.read")
+        clients_table.get_item.return_value = {"Item": {"team_id": "team-a", "team_role": "editor"}}
+        handler(_m2m_event(), None)
+        handler(_m2m_event(), None)
+        assert clients_table.get_item.call_count == 1
+
+    @patch("authorizer.time.monotonic")
+    @patch("authorizer.decode_and_verify_token")
+    def test_binding_refreshed_after_ttl(self, mock_decode, mock_clock, clients_table):
+        mock_decode.return_value = _make_access_token_claims(client_id="ci-client", scope="api/usecases.read")
+        clients_table.get_item.return_value = {"Item": {"team_id": "team-a", "team_role": "editor"}}
+        mock_clock.return_value = 1000.0
+        handler(_m2m_event(), None)
+        mock_clock.return_value = 1000.0 + authorizer.CLIENT_BINDING_TTL_SECONDS + 1
+        handler(_m2m_event(), None)
+        assert clients_table.get_item.call_count == 2
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_worker_client_is_worker_identity(self, mock_decode, clients_table, monkeypatch):
+        monkeypatch.setenv("WORKER_CLIENT_ID", "worker-client")
+        mock_decode.return_value = _make_access_token_claims(
+            client_id="worker-client", scope="api/usecases.read api/executions.write")
+        context = handler(_m2m_event(), None)["context"]
+        assert context["identityType"] == "worker"
+        assert json.loads(context["teamRoles"]) == []
+        assert context["isAdmin"] == "false"
+        clients_table.get_item.assert_not_called()
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_forbidden_scopes_stripped_from_client_tokens(self, mock_decode, clients_table):
+        mock_decode.return_value = _make_access_token_claims(
+            client_id="legacy-admin-client", scope="api/admin api/teams.manage api/usecases.read")
+        scopes = handler(_m2m_event(), None)["context"]["scope"].split()
+        assert scopes == ["api/usecases.read"]
+
+    @patch("authorizer.decode_and_verify_token")
+    def test_user_tokens_do_not_look_up_bindings(self, mock_decode, clients_table):
+        mock_decode.return_value = _make_access_token_claims(email="u@example.com", groups=["admins"])
+        context = handler(_m2m_event(), None)["context"]
+        assert "api/admin" in context["scope"]
+        clients_table.get_item.assert_not_called()
+
+
+def result_effect(policy):
+    return policy["policyDocument"]["Statement"][0]["Effect"]

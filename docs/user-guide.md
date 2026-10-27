@@ -222,28 +222,28 @@ In addition to importing a single use case through the UI, the QA Studio CLI sup
 
 ```bash
 # Import a single file
-qa-studio tests import ./login_test.json
+qa-studio tests import ./login_test.json --application-id <app-id>
 
 # Import all JSON files from a folder (recursive)
-qa-studio tests import ./testcases/ --yes
+qa-studio tests import ./testcases/ --application-id <app-id> --yes
 
 # Validate files without importing (dry-run)
 qa-studio tests import ./testcases/ --dry-run
 
 # Override the starting URL for a different environment
-qa-studio tests import ./testcases/ --base-url https://staging.example.com --yes
+qa-studio tests import ./testcases/ --application-id <app-id> --base-url https://staging.example.com --yes
 
 # CI pipeline usage: JSON output, no prompts
-qa-studio tests import ./testcases/ --format json --skip-secrets
+qa-studio tests import ./testcases/ --application-id <app-id> --format json --skip-secrets
 
 # Fully non-interactive with values supplied (dev/local credentials only)
-qa-studio tests import ./tests/auth/login.json \
+qa-studio tests import ./tests/auth/login.json --application-id <app-id> \
   --non-interactive \
   --secret admin_email=admin@dev.local \
-  --secret admin_password=devpass123
+  --secret admin_password="$DEV_ADMIN_PASSWORD"
 
 # Non-interactive deferring secret config to the UI
-qa-studio tests import ./tests/auth/login.json --non-interactive --skip-secrets
+qa-studio tests import ./tests/auth/login.json --application-id <app-id> --non-interactive --skip-secrets
 ```
 
 The import follows a two-phase flow:

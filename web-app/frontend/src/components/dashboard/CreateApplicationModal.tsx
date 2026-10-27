@@ -12,6 +12,9 @@ import Alert from '@cloudscape-design/components/alert';
 import { Application } from '../../types/application';
 import { api } from '../../utils/api';
 import { usePermissions } from '../../auth';
+import { useTeamOptions } from '../../hooks/useTeamOptions';
+
+const APP_CREATOR_ROLES = ['team_lead'] as const;
 
 interface CreateApplicationModalProps {
   visible: boolean;
@@ -21,41 +24,23 @@ interface CreateApplicationModalProps {
 }
 
 export function CreateApplicationModal({ visible, onDismiss, onSuccess, editApplication }: CreateApplicationModalProps) {
-  const { isAdmin, teams: userTeams } = usePermissions();
+  const { isAdmin } = usePermissions();
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [description, setDescription] = useState('');
   const [selectedTeam, setSelectedTeam] = useState<SelectProps.Option | null>(null);
-  const [teamOptions, setTeamOptions] = useState<SelectProps.Option[]>([]);
+  // Non-admins: only teams they lead (a Team Lead creates apps for their team)
+  const teamOptions = useTeamOptions(visible, APP_CREATOR_ROLES);
   const [environments, setEnvironments] = useState<string[]>([]);
   const [envInput, setEnvInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (visible) {
-      if (isAdmin) {
-        api.get('teams').then((data: any) => {
-          const teams = data.teams || data || [];
-          setTeamOptions(teams.map((t: any) => ({ label: t.name, value: t.id })));
-        }).catch(() => setTeamOptions([]));
-      } else {
-        // Non-admin: fetch their team details to get the name
-        const teamIds = userTeams.map((t: any) => t.team_id);
-        Promise.all(
-          teamIds.map((id: string) => api.get(`teams/${encodeURIComponent(id)}`).catch(() => null))
-        ).then((results) => {
-          const opts = results
-            .filter(Boolean)
-            .map((t: any) => ({ label: t.name, value: t.id }));
-          setTeamOptions(opts);
-          if (opts.length === 1 && !editApplication) {
-            setSelectedTeam(opts[0]);
-          }
-        });
-      }
+    if (!isAdmin && teamOptions.length === 1 && !editApplication) {
+      setSelectedTeam(teamOptions[0]);
     }
-  }, [visible, isAdmin, userTeams]);
+  }, [teamOptions, isAdmin, editApplication]);
 
   useEffect(() => {
     if (editApplication) {
@@ -83,6 +68,10 @@ export function CreateApplicationModal({ visible, onDismiss, onSuccess, editAppl
     }
     if (!baseUrl.trim()) {
       setError('Base URL is required');
+      return;
+    }
+    if (!editApplication && !selectedTeam?.value) {
+      setError('Team is required');
       return;
     }
 
@@ -146,12 +135,12 @@ export function CreateApplicationModal({ visible, onDismiss, onSuccess, editAppl
           <Textarea value={description} onChange={({ detail }) => setDescription(detail.value)} placeholder="Optional description" />
         </FormField>
 
-        <FormField label="Team" description="Assign this application to a team for access control">
+        <FormField label="Team" description="The team that owns this application" constraintText={editApplication ? undefined : 'Required'}>
           <Select
             selectedOption={selectedTeam}
             onChange={({ detail }) => setSelectedTeam(detail.selectedOption)}
             options={teamOptions}
-            placeholder="Select a team (optional)"
+            placeholder="Select a team"
             empty="No teams available"
           />
         </FormField>

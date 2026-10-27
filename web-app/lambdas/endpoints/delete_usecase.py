@@ -4,13 +4,15 @@ from typing import Any, Dict
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-from utils import create_response, get_table_name, require_scopes, validate_path_id
+from utils import create_response, no_content_response, get_table_name
+from resource_auth import require_resource_access, usecase_from_path
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+@require_resource_access('delete', usecase_from_path, scopes=['api/usecases.write'])
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Lambda handler to delete a usecase and all related data.
@@ -23,42 +25,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         API Gateway proxy response with deletion confirmation
     """
     try:
-        # Validate scope (requires usecases.write or admin)
-        user_identity, error_response = require_scopes(event, ['api/usecases.write'])
-        if error_response:
-            return error_response
-        
-        # Get usecase ID from path
-        path_params = event.get('pathParameters', {})
-        usecase_id, error = validate_path_id(event.get('pathParameters', {}).get('id'), 'usecase ID')
-        if error:
-            return error
+        usecase_id = event['pathParameters']['id']  # validated by usecase_from_path
 
         # Initialize Amazon DynamoDB client
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table(get_table_name())
 
-        # Resource-level authorization: check delete access on the usecase's app
-        uc_response = table.get_item(
-            Key={'pk': 'USECASES', 'sk': f'USECASE#{usecase_id}'}
-        )
-        uc_item = uc_response.get('Item', {})
-        uc_app_id = uc_item.get('application_id', '')
-        if uc_app_id:
-            from resource_auth import authorize_resource
-            cb_response = table.get_item(
-                Key={'pk': f'USECASE#{usecase_id}', 'sk': 'CREATED_BY'}
-            )
-            created_by_sub = cb_response.get('Item', {}).get('sub', '')
-            # owner_team_id from the already-loaded use case → no app read.
-            # Omit when absent (older records) so it falls back to reading the app.
-            auth_kwargs = {'created_by': created_by_sub}
-            if uc_item.get('owner_team_id'):
-                auth_kwargs['owner_team_id'] = uc_item['owner_team_id']
-            _, auth_err = authorize_resource(event, uc_app_id, 'delete', **auth_kwargs)
-            if auth_err:
-                return auth_err
-        
         # Delete Amazon Nova Act workflow definition if it exists
         delete_workflow_definition(usecase_id)
         
@@ -125,10 +97,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         logger.info(f"Successfully deleted usecase {usecase_id}")
         
-        return create_response(200, {
-            'status': 'usecase deleted',
-            'usecaseId': usecase_id
-        })
+        return no_content_response()
         
     except Exception as e:
         logger.error(f"Error deleting usecase: {str(e)}", exc_info=True)

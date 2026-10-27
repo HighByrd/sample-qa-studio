@@ -18,7 +18,7 @@ import { TestSuitesTable } from '../common/TestSuitesTable';
 import { DashboardOverviewItem } from '../../types/application';
 import { api, TestSuite } from '../../utils/api';
 import { useBatchExecute } from '../../hooks/useBatchExecute';
-import { usePermissions } from '../../auth';
+import { usePermissions, canManageApplication } from '../../auth';
 
 
 export default function ApplicationDetailView() {
@@ -47,7 +47,7 @@ export default function ApplicationDetailView() {
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState('');
   const { executeBatch, executing } = useBatchExecute();
-  const { isAdmin } = usePermissions();
+  const { isAdmin, teams } = usePermissions();
   const [reassignVisible, setReassignVisible] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -142,7 +142,9 @@ export default function ApplicationDetailView() {
         actions={
           <SpaceBetween direction="horizontal" size="m">
             {isAdmin && <Button onClick={() => setReassignVisible(true)}>Assign to team</Button>}
-            <Button onClick={() => navigate(`/applications/${id}/edit`)}>Edit</Button>
+            {canManageApplication(isAdmin, teams, app.owner_team_id) && (
+              <Button onClick={() => navigate(`/applications/${id}/edit`)}>Edit</Button>
+            )}
             <Button variant="primary" onClick={() => navigate(`/create/new?applicationId=${id}`)}>Create usecase</Button>
           </SpaceBetween>
         }

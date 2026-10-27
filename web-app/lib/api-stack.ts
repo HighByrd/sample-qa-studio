@@ -4,11 +4,14 @@ import * as cdk from 'aws-cdk-lib';
 import { RestApi, TokenAuthorizer, EndpointType, LambdaIntegration, AuthorizationType, Method, Resource, IResource, IdentitySource, AccessLogFormat, LogGroupLogDestination, UsagePlan, CfnAccount } from 'aws-cdk-lib/aws-apigateway';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { UserPool } from 'aws-cdk-lib/aws-cognito';
+import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Function } from 'aws-cdk-lib/aws-lambda';
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { NovaActQAStudioBaseStack, NovaActQAStudioBaseStackCreateProps } from './base-stack';
+import { API_DEFERRED_PROXIES_CONTEXT_KEY, ProxyResource, parseDeferredProxies } from './api-proxies';
 import { NovaActQAStudioLambdaStack } from './lambda-stack';
+import { configureAuthorizerClientBinding } from './authorizer-client-binding';
 
 enum HttpMethod {
   GET = 'GET',
@@ -20,6 +23,10 @@ enum HttpMethod {
 
 interface NovaActQAStudioApiStackCreateProps extends NovaActQAStudioBaseStackCreateProps {
   userPool: UserPool
+  // OAUTH_CLIENTS records (M2M team binding) read by the authorizer
+  table: Table
+  // Shared worker M2M client; the authorizer marks it identityType 'worker'
+  workerClientId: string
   apiDeploymentStage: string
   lambdaStack: NovaActQAStudioLambdaStack
   // Lambdas from other stacks (auth, worker)
@@ -115,6 +122,7 @@ export class NovaActQAStudioApiStack extends NovaActQAStudioBaseStack {
         USER_POOL_ID: props.userPool.userPoolId
       }
     });
+    configureAuthorizerClientBinding(this.authorizerLambda, props.table, props.workerClientId);
     
     // Lambda Token Authorizer (supports both user and M2M tokens)
     this.authorizer = new TokenAuthorizer(this, 'authorizer', {
@@ -500,20 +508,28 @@ export class NovaActQAStudioApiStack extends NovaActQAStudioBaseStack {
     const suiteSchedule = this.addResource(testSuite, 'schedule')
     this.addMethod(suiteSchedule, HttpMethod.PUT, l.updateSuiteScheduleLambda)
 
+    // {proxy+} children can be deferred for one deploy by scripts/deploy-api.ts
+    // (see api-proxies.ts) so older explicit {id} children are removed first.
+    const deferredProxies = parseDeferredProxies(this.node.tryGetContext(API_DEFERRED_PROXIES_CONTEXT_KEY))
+    const addRouterProxy = (parent: IResource, name: ProxyResource) => {
+      if (deferredProxies.has(name)) return
+      const proxy = parent.addProxy({
+        anyMethod: false,
+        defaultIntegration: new LambdaIntegration(l.applicationRouterLambda),
+      })
+      proxy.addMethod('ANY', new LambdaIntegration(l.applicationRouterLambda), {
+        authorizer: this.authorizer,
+        authorizationType: AuthorizationType.CUSTOM
+      })
+    }
+
     // /teams - Team management (uses application router Lambda with proxy)
     const teams = this.addResource(this.api.root, 'teams')
     this.addMethod(teams, HttpMethod.GET, l.applicationRouterLambda)
     this.addMethod(teams, HttpMethod.POST, l.applicationRouterLambda)
 
     // /teams/{proxy+} - All nested team paths handled by router
-    const teamsProxy = teams.addProxy({
-      anyMethod: false,
-      defaultIntegration: new LambdaIntegration(l.applicationRouterLambda),
-    })
-    teamsProxy.addMethod('ANY', new LambdaIntegration(l.applicationRouterLambda), {
-      authorizer: this.authorizer,
-      authorizationType: AuthorizationType.CUSTOM
-    })
+    addRouterProxy(teams, 'teams')
 
     // /applications - Application management (router Lambda with proxy)
     const applications = this.addResource(this.api.root, 'applications')
@@ -521,14 +537,7 @@ export class NovaActQAStudioApiStack extends NovaActQAStudioBaseStack {
     this.addMethod(applications, HttpMethod.POST, l.applicationRouterLambda)
 
     // /applications/{proxy+} - All nested application paths handled by router
-    const applicationsProxy = applications.addProxy({
-      anyMethod: false,
-      defaultIntegration: new LambdaIntegration(l.applicationRouterLambda),
-    })
-    applicationsProxy.addMethod('ANY', new LambdaIntegration(l.applicationRouterLambda), {
-      authorizer: this.authorizer,
-      authorizationType: AuthorizationType.CUSTOM
-    })
+    addRouterProxy(applications, 'applications')
 
     // /dashboard/overview - Dashboard overview
     const dashboard = this.addResource(this.api.root, 'dashboard')

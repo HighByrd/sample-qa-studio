@@ -3,7 +3,7 @@ import json
 import os
 import logging
 from typing import Any, Dict
-from utils import create_response, require_scopes, validate_path_id
+from utils import create_response, no_content_response, require_scopes, validate_path_id
 import permissions_repo
 import cognito_sync
 from perm_audit import log_permission_change
@@ -26,7 +26,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         { "confirm": true }
 
     Returns:
-        200: Deletion summary {orphanedApps, unassignedMembers}
+        204: Team deleted (counts are recorded in the team_delete audit entry)
         400: Bulk confirm required (>5 members without confirm flag)
         403: Insufficient permissions
         404: Team not found
@@ -85,7 +85,5 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     logger.info(f"Deleted team {team_id} ({team.get('name', '')})")
-    return create_response(200, {
-        'orphanedApps': result.get('orphaned_apps_count', 0),
-        'unassignedMembers': result.get('deleted_members_count', 0),
-    })
+    # Counts stay in the team_delete audit entry above.
+    return no_content_response()

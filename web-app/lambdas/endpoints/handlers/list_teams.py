@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict
 from utils import create_response, require_scopes, extract_user_identity
 import permissions_repo
+from resource_auth import has_team_role
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -25,11 +26,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if error_response:
         # Not admin — allow team leads a minimal list for the grant dropdown
         identity = extract_user_identity(event)
-        is_team_lead = any(
-            tr.get('role') in ('admin', 'team_lead')
-            for tr in identity.get('team_roles', [])
-        )
-        if not is_team_lead:
+        if not has_team_role(identity, None, 'team_lead'):
             return error_response
 
         teams = permissions_repo.list_teams()

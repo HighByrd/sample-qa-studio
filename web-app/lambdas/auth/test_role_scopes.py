@@ -3,12 +3,14 @@
 import os
 import sys
 import pytest
+from hypothesis import given, strategies as st
 
 # Add the auth directory to the path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from role_scopes import (
     ROLES,
+    TEAM_ROLES,
     ROLE_RANK,
     ACCESS_RANK,
     scopes_for_role,
@@ -26,6 +28,10 @@ class TestRoleConstants:
 
     def test_roles_ordered_highest_first(self):
         assert ROLES == ['admin', 'team_lead', 'editor', 'executor', 'viewer']
+
+    def test_team_roles_exclude_admin(self):
+        assert TEAM_ROLES == ('team_lead', 'editor', 'executor', 'viewer')
+        assert 'admin' not in TEAM_ROLES
 
     def test_role_rank_covers_all_roles(self):
         for role in ROLES:
@@ -119,11 +125,10 @@ class TestParseGroup:
         assert result['team_id'] == 'my-team'
         assert result['role'] == 'viewer'
 
-    def test_team_admin_group(self):
-        result = parse_group('team-platform-admin')
-        assert result is not None
-        assert result['team_id'] == 'platform'
-        assert result['role'] == 'admin'
+    def test_team_admin_group_is_not_recognized(self):
+        # Admin is studio-wide only; a team-scoped admin group must not parse.
+        assert parse_group('team-platform-admin') is None
+        assert parse_group('team-x-admin') is None
 
     def test_team_team_lead_group(self):
         result = parse_group('team-qa-team_lead')
@@ -152,8 +157,14 @@ class TestIsAdminGroup:
     def test_admins_is_admin(self):
         assert is_admin_group('admins') is True
 
-    def test_team_admin_is_admin(self):
-        assert is_admin_group('team-platform-admin') is True
+    def test_team_admin_is_not_admin(self):
+        assert is_admin_group('team-platform-admin') is False
+
+    def test_team_lead_is_not_admin(self):
+        assert is_admin_group('team-abc-team_lead') is False
+
+    def test_admins_with_whitespace_is_admin(self):
+        assert is_admin_group('  admins  ') is True
 
     def test_users_is_not_admin(self):
         assert is_admin_group('users') is False
@@ -178,6 +189,12 @@ class TestScopesForGroups:
         scopes = scopes_for_groups(['admins'])
         assert 'api/admin' in scopes
         assert 'api/usecases.read' in scopes
+
+    def test_team_admin_group_grants_no_scopes(self):
+        assert scopes_for_groups(['team-x-admin']) == set()
+
+    def test_team_admin_group_adds_nothing_to_other_groups(self):
+        assert scopes_for_groups(['team-x-admin', 'team-x-viewer']) == scopes_for_role('viewer')
 
     def test_team_editor_group(self):
         scopes = scopes_for_groups(['team-abc-editor'])
@@ -213,3 +230,19 @@ class TestScopesForGroups:
         assert 'api/teams.manage' in scopes
         assert 'api/usecases.execute' in scopes
         assert 'api/usecases.read' in scopes
+
+
+_team_ids = st.from_regex(r'[a-zA-Z0-9_-]{1,20}', fullmatch=True)
+_role_suffixes = st.one_of(st.sampled_from(ROLES), st.from_regex(r'[a-z_]{1,12}', fullmatch=True))
+
+
+class TestTeamGroupsNeverGrantAdmin:
+    """Property: no team group, whatever its suffix, grants api/admin or admin status."""
+
+    @given(team_id=_team_ids, role=_role_suffixes)
+    def test_team_group_never_grants_admin(self, team_id, role):
+        group = f'team-{team_id}-{role}'
+        assert 'api/admin' not in scopes_for_groups([group])
+        assert is_admin_group(group) is False
+        parsed = parse_group(group)
+        assert parsed is None or parsed['role'] in TEAM_ROLES

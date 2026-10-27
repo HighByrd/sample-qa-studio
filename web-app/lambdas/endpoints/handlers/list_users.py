@@ -5,6 +5,7 @@ from typing import Any, Dict
 import boto3
 from utils import create_response, require_scopes
 import permissions_repo
+from role_scopes import is_admin_group
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -54,10 +55,9 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
                 groups_resp = client.admin_list_groups_for_user(
                     UserPoolId=user_pool_id, Username=user_sub)
                 group_names = [g.get('GroupName', '') for g in groups_resp.get('Groups', [])]
-                is_admin = 'admins' in group_names or any(
-                    g.endswith('-admin') for g in group_names)
+                is_admin = any(is_admin_group(g) for g in group_names)
             except Exception as e:
-                logger.warning(f"Failed to list groups for {user_sub}: {e}")
+                logger.warning(f"Failed to list groups: {e}")
 
             # Get team memberships from DynamoDB
             memberships = permissions_repo.list_user_teams(user_sub)

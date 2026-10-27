@@ -13,10 +13,13 @@ setup(
     extras_require={
         "runner": [
             "nova-act~=3.3",
+            # Transitive floor (via nova-act): Pillow 12.x security advisories
+            "pillow>=13.0.0",
             "boto3>=1.34.0",
             "tenacity>=8.2.0",
             "playwright",
             "Appium-Python-Client>=4.0.0",
+            "defusedxml>=0.7.1",
             "mypy-boto3-devicefarm",
             "requests>=2.33.0",
             "jsonschema>=4.18.0",

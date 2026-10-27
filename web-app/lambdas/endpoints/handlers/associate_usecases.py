@@ -2,20 +2,23 @@ import json
 import logging
 from typing import Any, Dict, Optional
 import boto3
-from utils import create_response, get_table_name, require_scopes, validate_path_id, get_current_timestamp
+from utils import create_response, get_table_name, validate_path_id, get_current_timestamp
+from resource_auth import require_resource_access, app_from_path, authorize_resource, owner_of
+import permissions_repo
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+@require_resource_access('edit', app_from_path, scopes=['api/applications.write'])
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
-    user_identity, error_response = require_scopes(event, ['api/applications.write'])
-    if error_response:
-        return error_response
+    """
+    Add or remove use cases on an application.
 
-    app_id, error = validate_path_id(event.get('pathParameters', {}).get('id'), 'application ID')
-    if error:
-        return error
+    Requires edit on the target app (decorator) and edit on each use case's
+    current app, so nobody can pull in or detach another team's use cases.
+    """
+    app_id = event['pathParameters']['id']  # validated by app_from_path
 
     try:
         body = json.loads(event.get('body', '{}'))
@@ -28,35 +31,47 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if not usecase_ids or not isinstance(usecase_ids, list):
         return create_response(400, {'error': 'usecase_ids must be a non-empty list'})
 
+    usecase_err = _authorize_current_apps(event, app_id, usecase_ids)
+    if usecase_err:
+        return usecase_err
+
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table(get_table_name())
-
-    # Load the target application: needed for existence and, more importantly,
-    # for resource-level authorization (the app's owning team).
-    app_meta = table.get_item(
-        Key={'pk': f'APPLICATION#{app_id}', 'sk': 'METADATA'}
-    ).get('Item')
-    if not app_meta:
-        return create_response(404, {'error': 'Application not found'})
-
-    # Resource-level authorization: the caller must have edit access to the app
-    # (mirrors create_usecase). Admins bypass; non-members and callers acting on
-    # an orphaned/other-team app get 403. Pass the owner we already loaded to
-    # avoid a redundant read.
-    from resource_auth import authorize_resource
-    _, auth_err = authorize_resource(
-        event, app_id, 'edit', owner_team_id=app_meta.get('owner_team_id') or None
-    )
-    if auth_err:
-        return auth_err
 
     if action == 'remove':
         return _remove_usecases(table, app_id, usecase_ids)
 
     return _add_usecases(
         table, app_id, usecase_ids, body.get('environment', ''),
-        app_meta.get('owner_team_id'),
+        permissions_repo.get_app_owner(app_id),
     )
+
+
+def _authorize_current_apps(event: Dict[str, Any], app_id: str,
+                            usecase_ids: list) -> Optional[Dict[str, Any]]:
+    """
+    Require edit on the app each use case currently belongs to. Use cases
+    already in `app_id` are covered by the decorator; orphaned use cases
+    (no app) are admin-only.
+
+    Returns:
+        None when allowed, otherwise a 400/403/404 response.
+    """
+    for usecase_id in usecase_ids:
+        _, err = validate_path_id(usecase_id if isinstance(usecase_id, str) else None, 'usecase ID')
+        if err:
+            return err
+        owner = permissions_repo.get_usecase_owner(usecase_id)
+        if owner is None:
+            return create_response(404, {'error': f'Use case {usecase_id} not found'})
+        current_app_id, current_owner = owner_of(owner)
+        if current_app_id == app_id:
+            continue
+        _, auth_err = authorize_resource(event, current_app_id or '', 'edit',
+                                         owner_team_id=current_owner)
+        if auth_err:
+            return auth_err
+    return None
 
 
 def _add_usecases(table, app_id: str, usecase_ids: list, environment: str,

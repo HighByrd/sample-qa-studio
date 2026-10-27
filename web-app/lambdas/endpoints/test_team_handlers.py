@@ -213,7 +213,7 @@ class TestUpdateTeam:
 # ======================================================================
 
 class TestDeleteTeam:
-    @patch('perm_audit.log_permission_change')
+    @patch('handlers.delete_team.log_permission_change')
     @patch('cognito_sync.delete_team_groups')
     @patch('permissions_repo.delete_team')
     @patch('permissions_repo.list_team_members')
@@ -230,10 +230,11 @@ class TestDeleteTeam:
         os.environ['USER_POOL_ID'] = 'pool-123'
         response = handle(event)
 
-        assert response['statusCode'] == 200
-        body = json.loads(response['body'])
-        assert body['unassignedMembers'] == 3
-        assert body['orphanedApps'] == 1
+        assert response['statusCode'] == 204
+        assert response['body'] == ''
+        details = mock_audit.call_args.kwargs['details']
+        assert details['deleted_members_count'] == 3
+        assert details['orphaned_apps_count'] == 1
 
     @patch('permissions_repo.list_team_members')
     @patch('permissions_repo.get_team')
@@ -267,7 +268,7 @@ class TestDeleteTeam:
         os.environ['USER_POOL_ID'] = 'pool-123'
         response = handle(event)
 
-        assert response['statusCode'] == 200
+        assert response['statusCode'] == 204
 
     @patch('permissions_repo.get_team')
     def test_team_not_found(self, mock_get):

@@ -11,7 +11,6 @@ Data model:
 - APPLICATION#{id}/METADATA — extended with owner_team_id, gsi2pk, gsi2sk
   - gsi2pk=OWNERTEAM#{team_id}, gsi2sk=APP#{app_id}
 - USECASE#{id}/OVERRIDE — test case visibility override
-- ADMIN_COUNT/GLOBAL — system-wide admin counter
 """
 
 import logging
@@ -349,7 +348,7 @@ def add_membership(team_id: str, user_sub: str, role: str) -> dict:
     }
 
     table.put_item(Item=membership)
-    logger.info(f"Added member {user_sub} to team {team_id} as {role}")
+    logger.info(f"Added member to team {team_id} as {role}")
     return membership
 
 
@@ -398,25 +397,25 @@ def remove_membership(user_sub: str, team_id: str) -> None:
     """
     table = _get_table()
     table.delete_item(Key={'pk': f'TEAM#{team_id}', 'sk': f'MEMBER#{user_sub}'})
-    logger.info(f"Removed member {user_sub} from team {team_id}")
+    logger.info(f"Removed member from team {team_id}")
 
 
 def set_member_role(user_sub: str, team_id: str, new_role: str) -> dict:
     """
     Update a member's role in a team.
 
-    Implements BL-3: last-admin guard. If demoting the last admin, raises ValueError.
+    Callers validate new_role against role_scopes.TEAM_ROLES. The studio-wide
+    last-admin guard lives in the user handlers (global 'admins' group).
 
     Args:
         user_sub: Cognito user sub.
         team_id: Team ID.
-        new_role: New role value (e.g. 'admin', 'editor', 'viewer').
+        new_role: New team role (e.g. 'team_lead', 'editor', 'viewer').
 
     Returns:
         Updated membership dict.
 
     Raises:
-        ValueError: If attempting to demote the last admin.
         KeyError: If membership not found.
     """
     table = _get_table()
@@ -435,13 +434,7 @@ def set_member_role(user_sub: str, team_id: str, new_role: str) -> dict:
     if old_role == new_role:
         return current
 
-    # 3. Last-admin guard
-    if old_role == 'admin' and new_role != 'admin':
-        admin_count = count_admins()
-        if admin_count <= 1:
-            raise ValueError("Cannot demote the last admin")
-
-    # 4. Update the membership role
+    # 3. Update the membership role
     table.update_item(
         Key={'pk': f'TEAM#{team_id}', 'sk': f'MEMBER#{user_sub}'},
         UpdateExpression='SET #r = :r',
@@ -449,14 +442,8 @@ def set_member_role(user_sub: str, team_id: str, new_role: str) -> dict:
         ExpressionAttributeValues={':r': new_role},
     )
 
-    # 5. Maintain ADMIN_COUNT counter
-    if old_role == 'admin' and new_role != 'admin':
-        _decrement_admin_count()
-    elif old_role != 'admin' and new_role == 'admin':
-        _increment_admin_count()
-
     current['role'] = new_role
-    logger.info(f"Changed role for {user_sub} in team {team_id}: {old_role} -> {new_role}")
+    logger.info(f"Changed role in team {team_id}: {old_role} -> {new_role}")
     return current
 
 
@@ -475,56 +462,6 @@ def list_team_members(team_id: str) -> list:
         KeyConditionExpression=Key('pk').eq(f'TEAM#{team_id}') & Key('sk').begins_with('MEMBER#')
     )
     return response.get('Items', [])
-
-
-def count_admins() -> int:
-    """
-    Get the system-wide admin count from the counter item.
-
-    Returns:
-        Number of admin memberships system-wide.
-    """
-    table = _get_table()
-    response = table.get_item(Key={'pk': 'ADMIN_COUNT', 'sk': 'GLOBAL'})
-    item = response.get('Item')
-    if not item:
-        return 0
-    return int(item.get('count', 0))
-
-
-def _increment_admin_count() -> None:
-    """Atomically increment the system-wide admin counter."""
-    table = _get_table()
-    table.update_item(
-        Key={'pk': 'ADMIN_COUNT', 'sk': 'GLOBAL'},
-        UpdateExpression='ADD #c :inc',
-        ExpressionAttributeNames={'#c': 'count'},
-        ExpressionAttributeValues={':inc': 1},
-    )
-
-
-def _decrement_admin_count() -> None:
-    """Atomically decrement the system-wide admin counter."""
-    table = _get_table()
-    table.update_item(
-        Key={'pk': 'ADMIN_COUNT', 'sk': 'GLOBAL'},
-        UpdateExpression='ADD #c :dec',
-        ExpressionAttributeNames={'#c': 'count'},
-        ExpressionAttributeValues={':dec': -1},
-    )
-
-
-def initialize_admin_count(count: int = 0) -> None:
-    """
-    Initialize the admin counter item. Safe to call multiple times.
-
-    Args:
-        count: Initial count value (default 0).
-    """
-    table = _get_table()
-    table.put_item(
-        Item={'pk': 'ADMIN_COUNT', 'sk': 'GLOBAL', 'count': count}
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +547,32 @@ def set_app_resources_owner(app_id: str, team_id: str) -> dict:
     return counts
 
 
+def _get_projected(pk: str, sk: str, attributes: tuple) -> Optional[dict]:
+    """get_item reading only `attributes` (aliased, so reserved words like
+    `status` are safe). Returns the item or None when it does not exist."""
+    table = _get_table()
+    names = {f'#a{i}': name for i, name in enumerate(attributes)}
+    response = table.get_item(
+        Key={'pk': pk, 'sk': sk},
+        ProjectionExpression=', '.join(['#pk'] + list(names)),
+        ExpressionAttributeNames={'#pk': 'pk', **names},
+    )
+    return response.get('Item')
+
+
+def get_app_ownership(app_id: str) -> Optional[dict]:
+    """
+    Read an application's ownership.
+
+    Returns:
+        {'owner_team_id': str|None}, or None when the app does not exist.
+    """
+    item = _get_projected(f'APPLICATION#{app_id}', 'METADATA', ('owner_team_id',))
+    if item is None:
+        return None
+    return {'owner_team_id': item.get('owner_team_id') or None}
+
+
 def get_app_owner(app_id: str) -> Optional[str]:
     """
     Get the owning team ID for an application.
@@ -620,12 +583,87 @@ def get_app_owner(app_id: str) -> Optional[str]:
     Returns:
         Team ID string, or None if no owner set or app not found.
     """
-    table = _get_table()
-    response = table.get_item(Key={'pk': f'APPLICATION#{app_id}', 'sk': 'METADATA'})
-    item = response.get('Item')
-    if not item:
+    ownership = get_app_ownership(app_id)
+    return ownership['owner_team_id'] if ownership else None
+
+
+def get_usecase_owner(usecase_id: str, include_creator: bool = False) -> Optional[dict]:
+    """
+    Read the ownership fields of a use case (USECASES/USECASE#{id}).
+
+    Args:
+        usecase_id: Use case ID.
+        include_creator: Also read USECASE#{id}/CREATED_BY for the
+            creator-retains-edit rule (one extra get_item).
+
+    Returns:
+        {'application_id', 'owner_team_id', 'created_by'} (values may be None),
+        or None when the use case does not exist.
+    """
+    item = _get_projected('USECASES', f'USECASE#{usecase_id}', ('application_id', 'owner_team_id'))
+    if item is None:
         return None
-    return item.get('owner_team_id')
+    created_by = None
+    if include_creator:
+        creator = _get_projected(f'USECASE#{usecase_id}', 'CREATED_BY', ('sub',))
+        created_by = (creator or {}).get('sub') or None
+    return {
+        'application_id': item.get('application_id') or None,
+        'owner_team_id': item.get('owner_team_id') or None,
+        'created_by': created_by,
+    }
+
+
+def get_suite_owner(suite_id: str) -> Optional[dict]:
+    """
+    Read the ownership fields of a test suite (TEST_SUITES/SUITE#{id}).
+
+    Returns:
+        {'application_id', 'owner_team_id'} (values may be None), or None when
+        the suite does not exist.
+    """
+    item = _get_projected('TEST_SUITES', f'SUITE#{suite_id}', ('application_id', 'owner_team_id'))
+    if item is None:
+        return None
+    return {
+        'application_id': item.get('application_id') or None,
+        'owner_team_id': item.get('owner_team_id') or None,
+    }
+
+
+_EXECUTION_AUTH_FIELDS = ('status', 'worker_token_hash', 'suite_id', 'suite_execution_id')
+
+
+def get_execution_record(usecase_id: str, execution_id: str) -> Optional[dict]:
+    """
+    Read the authorization fields of a use case execution
+    (USECASE_EXECUTION#{usecase_id}/EXECUTION#{execution_id}).
+
+    The key includes the use case, so a hit also proves the execution
+    belongs to that use case.
+
+    Returns:
+        {'status', 'worker_token_hash', 'suite_id', 'suite_execution_id'}
+        (values may be None), or None when the execution does not exist.
+    """
+    item = _get_projected(f'USECASE_EXECUTION#{usecase_id}', f'EXECUTION#{execution_id}',
+                          _EXECUTION_AUTH_FIELDS)
+    if item is None:
+        return None
+    return {field: item.get(field) or None for field in _EXECUTION_AUTH_FIELDS}
+
+
+def get_suite_execution_record(suite_id: str, execution_id: str) -> Optional[dict]:
+    """
+    Read a suite execution (SUITE_EXECUTION#{suite_id}/EXECUTION#{execution_id}).
+
+    Returns:
+        {'status'} (value may be None), or None when it does not exist.
+    """
+    item = _get_projected(f'SUITE_EXECUTION#{suite_id}', f'EXECUTION#{execution_id}', ('status',))
+    if item is None:
+        return None
+    return {'status': item.get('status') or None}
 
 
 def list_team_apps(team_id: str) -> list:
@@ -808,3 +846,47 @@ def get_testcase_override(testcase_id: str) -> Optional[dict]:
         Key={'pk': f'USECASE#{testcase_id}', 'sk': 'OVERRIDE'}
     )
     return response.get('Item')
+
+
+# BatchGetItem accepts at most 100 keys per request.
+_BATCH_GET_MAX_KEYS = 100
+# Bound the UnprocessedKeys retry loop (throttling); callers fail closed on error.
+_BATCH_GET_MAX_ATTEMPTS = 5
+
+
+def batch_get_testcase_overrides(testcase_ids: list) -> dict:
+    """
+    Load the visibility overrides of many test cases with BatchGetItem on
+    USECASE#{id}/OVERRIDE (chunks of 100 keys, UnprocessedKeys retried).
+
+    Args:
+        testcase_ids: Use case / test case IDs (duplicates ignored).
+
+    Returns:
+        {testcase_id: override item} for the test cases that have one.
+
+    Raises:
+        RuntimeError when keys are still unprocessed after the retries, or
+        the underlying ClientError; callers deny on error.
+    """
+    unique_ids = list(dict.fromkeys(testcase_ids))
+    if not unique_ids:
+        return {}
+    dynamodb = boto3.resource('dynamodb')
+    table_name = get_table_name()
+    overrides = {}
+    for start in range(0, len(unique_ids), _BATCH_GET_MAX_KEYS):
+        chunk = unique_ids[start:start + _BATCH_GET_MAX_KEYS]
+        request_items = {table_name: {
+            'Keys': [{'pk': f'USECASE#{tc}', 'sk': 'OVERRIDE'} for tc in chunk],
+        }}
+        for _ in range(_BATCH_GET_MAX_ATTEMPTS):
+            response = dynamodb.batch_get_item(RequestItems=request_items)
+            for item in response.get('Responses', {}).get(table_name, []):
+                overrides[item['pk'].split('#', 1)[1]] = item
+            request_items = response.get('UnprocessedKeys') or {}
+            if not request_items:
+                break
+        if request_items:
+            raise RuntimeError('batch_get_testcase_overrides: keys left unprocessed')
+    return overrides

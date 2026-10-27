@@ -7,13 +7,14 @@ import Box from '@cloudscape-design/components/box';
 import Select, { SelectProps } from '@cloudscape-design/components/select';
 import { useTeamMembers } from '../../hooks/useTeamMembers';
 import { usePermissions } from '../../auth';
-import { Member, Role } from '../../types/permissions';
+import { Member, Role, TEAM_ROLES } from '../../types/permissions';
 import AddMemberModal from './AddMemberModal';
 
 interface MembersTabProps {
   teamId: string;
 }
 
+// 'admin' stays for display only: legacy team memberships may still carry it.
 const ROLE_LABELS: Record<Role, string> = {
   admin: 'Admin',
   team_lead: 'Team Lead',
@@ -22,7 +23,13 @@ const ROLE_LABELS: Record<Role, string> = {
   viewer: 'Viewer',
 };
 
-const ALL_ROLES: Role[] = ['admin', 'team_lead', 'editor', 'executor', 'viewer'];
+/**
+ * Roles the actor may assign on a team. Admin is studio-wide and is never
+ * offered here (it is granted from Administration > Users).
+ */
+export function assignableTeamRoles(isAdmin: boolean, isTeamLead: boolean): Role[] {
+  return isAdmin || isTeamLead ? [...TEAM_ROLES] : [];
+}
 
 const MembersTab: React.FC<MembersTabProps> = ({ teamId }) => {
   const { members, loading, fetchMembers, addMember, removeMember, changeRole } =
@@ -35,11 +42,7 @@ const MembersTab: React.FC<MembersTabProps> = ({ teamId }) => {
   }, [fetchMembers]);
 
   // Determine which roles the actor can assign
-  const getAllowedRoles = (): Role[] => {
-    if (isAdmin) return ALL_ROLES;
-    if (isTeamLead) return ['team_lead', 'editor', 'executor', 'viewer'];
-    return [];
-  };
+  const getAllowedRoles = (): Role[] => assignableTeamRoles(isAdmin, isTeamLead);
 
   const canManageMembers = isAdmin || isTeamLead;
 

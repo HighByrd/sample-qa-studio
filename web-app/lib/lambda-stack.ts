@@ -457,50 +457,50 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
     // Secrets Lambdas
     this.createUsecaseSecretsLambda = this.createPythonLambda({
       path: 'create_usecase_secrets',
-      environment: { SECRET_PREFIX: props.baseName }
+      environment: { TABLE_NAME: props.table.tableName, SECRET_PREFIX: props.baseName }
     })
 
     this.getUsecaseSecretsLambda = this.createPythonLambda({
       path: 'get_usecase_secrets',
-      environment: { SECRET_PREFIX: props.baseName }
+      environment: { TABLE_NAME: props.table.tableName, SECRET_PREFIX: props.baseName }
     })
 
     this.getUsecaseSecretValueLambda = this.createPythonLambda({
       path: 'get_usecase_secret_value',
-      environment: { SECRET_PREFIX: props.baseName }
+      environment: { TABLE_NAME: props.table.tableName, SECRET_PREFIX: props.baseName }
     })
 
     this.deleteUsecaseSecretsLambda = this.createPythonLambda({
       path: 'delete_usecase_secrets',
-      environment: { SECRET_PREFIX: props.baseName }
+      environment: { TABLE_NAME: props.table.tableName, SECRET_PREFIX: props.baseName }
     })
 
     this.updateUsecaseSecretsLambda = this.createPythonLambda({
       path: 'update_usecase_secrets',
-      environment: { SECRET_PREFIX: props.baseName }
+      environment: { TABLE_NAME: props.table.tableName, SECRET_PREFIX: props.baseName }
     })
 
     // Recording Lambdas
     this.listRecordingBatchesLambda = this.createPythonLambda({
       path: 'list_recording_batches',
-      environment: { BUCKET_NAME: props.artefactsBucket.bucketName }
+      environment: { TABLE_NAME: props.table.tableName, BUCKET_NAME: props.artefactsBucket.bucketName }
     })
 
     this.getRecordingBatchLambda = this.createPythonLambda({
       path: 'get_recording_batch',
       timeout: cdk.Duration.seconds(30),
       memorySize: 1024,
-      environment: { BUCKET_NAME: props.artefactsBucket.bucketName }
+      environment: { TABLE_NAME: props.table.tableName, BUCKET_NAME: props.artefactsBucket.bucketName }
     })
 
     this.listDownloadsLambda = this.createPythonLambda({
       path: 'list_downloads',
-      environment: { BUCKET_NAME: props.artefactsBucket.bucketName }
+      environment: { TABLE_NAME: props.table.tableName, BUCKET_NAME: props.artefactsBucket.bucketName }
     })
 
     this.downloadFileLambda = this.createPythonLambda({
       path: 'download_file',
-      environment: { BUCKET_NAME: props.artefactsBucket.bucketName }
+      environment: { TABLE_NAME: props.table.tableName, BUCKET_NAME: props.artefactsBucket.bucketName }
     })
 
     this.getVideoPlaybackLambda = this.createPythonLambda({
@@ -600,6 +600,7 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
     this.requestRecordingDownloadLambda = this.createPythonLambda({
       path: 'request_recording_download',
       environment: {
+        TABLE_NAME: props.table.tableName,
         RECORDING_QUEUE_URL: props.recordingQueueUrl,
       }
     })
@@ -644,6 +645,13 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       }
     });
 
+    // Keep the exports that pre-v1.3 api stacks import. v1.3 routes GET/POST
+    // /users through the user router, so CDK would stop exporting these ARNs;
+    // but this stack deploys before api, and CloudFormation refuses to delete
+    // an export that is still imported. Remove these two lines once every
+    // deployment has run v1.3 (api no longer imports them).
+    this.exportValue(this.listUsersLambda.functionArn);
+    this.exportValue(this.addUserLambda.functionArn);
     this.removeUserLambda = this.createPythonLambda({
       path: 'delete_user',
       environment: {
@@ -672,10 +680,13 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       resources: [props.userPool.userPoolArn]
     }));
 
+    // AdminListGroupsForUser + ListUsersInGroup back the last-admin guard
     this.removeUserLambda.addToRolePolicy(new PolicyStatement({
       effect: Effect.ALLOW,
       actions: [
-        'cognito-idp:AdminDeleteUser'
+        'cognito-idp:AdminDeleteUser',
+        'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:ListUsersInGroup'
       ],
       resources: [props.userPool.userPoolArn]
     }));
@@ -960,6 +971,7 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
     this.getScheduleLambda = this.createPythonLambda({
       path: 'get_schedule',
       environment: {
+        TABLE_NAME: props.table.tableName,
         SCHEDULER_GROUP_NAME: props.schedulerGroupName
       }
     });
@@ -975,6 +987,7 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
     this.deleteScheduleLambda = this.createPythonLambda({
       path: 'delete_schedule',
       environment: {
+        TABLE_NAME: props.table.tableName,
         SCHEDULER_GROUP_NAME: props.schedulerGroupName
       }
     });
@@ -1023,6 +1036,8 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
         'cognito-idp:CreateGroup',
         'cognito-idp:DeleteGroup',
         'cognito-idp:ListUsers',
+        // Last-admin guard counts members of the global 'admins' group
+        'cognito-idp:ListUsersInGroup',
       ],
       resources: [props.userPool.userPoolArn]
     }))
@@ -1135,6 +1150,44 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
       this.deleteTestSuiteLambda
     ]
     fullAccessLambdas.forEach(lambda => lambda.role?.addManagedPolicy(props.tableFullAccessPolicy))
+
+    // Need table read for the require_resource_access owner lookup: the
+    // resolvers GetItem the use case / app / execution / override records and
+    // Query shared-access grants before the handler runs. These roles otherwise
+    // have only write (or no) table access. Guarded by
+    // lib/__tests__/ownership-check-iam.test.ts.
+    const ownershipCheckLambdas = [
+      this.updateUsecaseLambda,
+      this.importUsecaseLambda,
+      this.createStepLambda,
+      this.updateStepLambda,
+      this.reorderStepsLambda,
+      this.createLiveViewLambda,
+      this.deleteLiveViewLambda,
+      this.updateMobileMetadataLambda,
+      this.getExecutionHeadersLambda,
+      this.createTrajectoryUploadUrlLambda,
+      this.getTrajectoryDownloadUrlLambda,
+      this.createUsecaseVariablesLambda,
+      this.createUsecaseHooksLambda,
+      this.createUsecaseHeadersLambda,
+      this.createUsecaseSecretsLambda,
+      this.getUsecaseSecretsLambda,
+      this.getUsecaseSecretValueLambda,
+      this.deleteUsecaseSecretsLambda,
+      this.updateUsecaseSecretsLambda,
+      this.listRecordingBatchesLambda,
+      this.getRecordingBatchLambda,
+      this.listDownloadsLambda,
+      this.downloadFileLambda,
+      this.requestRecordingDownloadLambda,
+      this.subscribeUsecaseLambda,
+      this.createOAuthClientLambda,
+      this.getScheduleLambda,
+      this.deleteScheduleLambda,
+      this.sendRecordingCommandLambda
+    ]
+    ownershipCheckLambdas.forEach(lambda => lambda.role?.addManagedPolicy(props.tableReadPolicy))
 
     // Lambdas that need both read and write
     this.importTemplateLambda.role?.addManagedPolicy(props.tableReadPolicy)

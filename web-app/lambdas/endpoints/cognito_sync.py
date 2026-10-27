@@ -2,28 +2,39 @@
 Cognito group synchronization utilities.
 
 Creates, deletes, and manages Cognito user pool groups that correspond to team roles.
-For each team, 5 groups are created: team-{teamId}-{role} for each role.
+For each team, 4 groups are created: team-{teamId}-{role} for each role in TEAM_ROLES.
+Admin is studio-wide (global 'admins' group) and never a team group.
 
 Operations:
-- ensure_team_groups: Create all 5 role groups for a team (idempotent)
-- delete_team_groups: Delete all 5 role groups for a team (idempotent)
+- ensure_team_groups: Create all 4 role groups for a team (idempotent)
+- delete_team_groups: Delete all 4 role groups, plus the legacy -admin group (idempotent)
 - set_user_role: Change a user's role (add-first-then-remove, no access gap)
 - remove_user_from_team_role: Remove a user from a specific team role group
+- count_studio_admins: Count members of the global 'admins' group
+- is_last_studio_admin: Last-admin guard for the global 'admins' group
 """
 
 import logging
 import boto3
+from role_scopes import TEAM_ROLES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Roles that get a Cognito group per team
-_TEAM_ROLES = ['admin', 'team_lead', 'editor', 'executor', 'viewer']
+_TEAM_ROLES = TEAM_ROLES
+
+# Team groups created by older releases that must still be cleaned up on delete.
+# 'team-{id}-admin' used to (wrongly) grant studio admin.
+_LEGACY_TEAM_ROLES = ('admin',)
+
+# The only group that grants studio-wide admin
+ADMINS_GROUP = 'admins'
 
 
 def ensure_team_groups(team_id: str, user_pool_id: str) -> list:
     """
-    Ensure all 5 role groups exist for a team in the Cognito User Pool.
+    Ensure all 4 role groups exist for a team in the Cognito User Pool.
 
     Creates groups with the naming convention: team-{teamId}-{role}
     Swallows GroupExistsException if groups already exist (idempotent).
@@ -60,7 +71,8 @@ def ensure_team_groups(team_id: str, user_pool_id: str) -> list:
 
 def delete_team_groups(team_id: str, user_pool_id: str) -> list:
     """
-    Delete all 5 role groups for a team from the Cognito User Pool.
+    Delete all 4 role groups for a team from the Cognito User Pool, plus the
+    legacy team-{teamId}-admin group if it still exists.
 
     Idempotent: swallows ResourceNotFoundException if a group doesn't exist.
 
@@ -74,7 +86,7 @@ def delete_team_groups(team_id: str, user_pool_id: str) -> list:
     client = boto3.client('cognito-idp')
     group_names = []
 
-    for role in _TEAM_ROLES:
+    for role in _TEAM_ROLES + _LEGACY_TEAM_ROLES:
         group_name = f'team-{team_id}-{role}'
         try:
             client.delete_group(
@@ -168,3 +180,52 @@ def set_user_role(sub: str, team_id: str, old_role: str, new_role: str, user_poo
             f"Failed to remove user {sub} from old group {old_group_name}: {e}. "
             f"User may have both roles briefly."
         )
+
+
+def count_studio_admins(user_pool_id: str) -> int:
+    """
+    Count the members of the global 'admins' group (the only studio admins).
+
+    Paginates list_users_in_group. Used by the last-admin guard.
+
+    Args:
+        user_pool_id: The Cognito User Pool ID.
+
+    Returns:
+        Number of users in the 'admins' group.
+    """
+    client = boto3.client('cognito-idp')
+    count = 0
+    kwargs = {'UserPoolId': user_pool_id, 'GroupName': ADMINS_GROUP}
+    while True:
+        response = client.list_users_in_group(**kwargs)
+        count += len(response.get('Users', []))
+        next_token = response.get('NextToken')
+        if not next_token:
+            return count
+        kwargs['NextToken'] = next_token
+
+
+def is_last_studio_admin(username: str, user_pool_id: str) -> bool:
+    """
+    Last-admin guard: True if `username` is in 'admins' and is its only member.
+
+    Errors propagate so callers fail closed (refuse the change).
+
+    Args:
+        username: Cognito username (sub) of the user being demoted or deleted.
+        user_pool_id: The Cognito User Pool ID.
+
+    Returns:
+        True when removing this user would leave the studio without an admin.
+    """
+    client = boto3.client('cognito-idp')
+    kwargs = {'UserPoolId': user_pool_id, 'Username': username}
+    while True:
+        response = client.admin_list_groups_for_user(**kwargs)
+        if any(g.get('GroupName') == ADMINS_GROUP for g in response.get('Groups', [])):
+            return count_studio_admins(user_pool_id) <= 1
+        next_token = response.get('NextToken')
+        if not next_token:
+            return False
+        kwargs['NextToken'] = next_token

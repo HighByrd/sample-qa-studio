@@ -3,23 +3,22 @@ import json
 import os
 import logging
 from typing import Any, Dict
-from utils import create_response, require_scopes, extract_user_identity, validate_path_id
+from utils import create_response, extract_user_identity, validate_path_id
 import permissions_repo
+from resource_auth import require_team_role, validate_team_role
+from role_scopes import TEAM_ROLES
 import cognito_sync
 from perm_audit import log_permission_change
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-_VALID_ROLES = {'admin', 'team_lead', 'editor', 'executor', 'viewer'}
-
 
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     """
     Change a team member's role.
 
-    Requires api/admin scope OR caller must be team-lead/admin of the target team.
-    Implements last-admin guard (409 if demoting the last admin).
+    Requires api/admin scope OR caller must be team lead of the target team.
     Implements membership mutation saga with compensation.
 
     Path parameters:
@@ -34,25 +33,14 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         400: Invalid input
         403: Insufficient permissions
         404: Membership not found
-        409: Last-admin guard violation
         500: Saga failure (compensated)
     """
     # Auth: admin or team-lead
-    user_identity, error_response = require_scopes(event, ['api/admin'])
-    if error_response:
-        identity = extract_user_identity(event)
-        if identity.get('is_admin'):
-            user_identity = identity
-        else:
-            team_id_raw = (event.get('pathParameters') or {}).get('id', '')
-            team_roles = identity.get('team_roles', [])
-            is_team_lead = any(
-                tr.get('team_id') == team_id_raw and tr.get('role') in ('admin', 'team_lead')
-                for tr in team_roles
-            )
-            if not is_team_lead:
-                return create_response(403, {'error': 'Admin or team lead required'})
-            user_identity = identity
+    user_identity = extract_user_identity(event)
+    team_id_raw = (event.get('pathParameters') or {}).get('id', '')
+    auth_error = require_team_role(user_identity, team_id_raw, 'team_lead', 'Admin or team lead required')
+    if auth_error:
+        return auth_error
 
     team_id, error = validate_path_id(
         (event.get('pathParameters') or {}).get('id'), 'team ID'
@@ -74,15 +62,13 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     new_role = body.get('role', '').strip()
     if not new_role:
         return create_response(400, {'error': 'role is required'})
-    if new_role not in _VALID_ROLES:
-        return create_response(400, {'error': f'Invalid role. Must be one of: {", ".join(sorted(_VALID_ROLES))}'})
+    role_error = validate_team_role(new_role)
+    if role_error:
+        return role_error
 
-    # SAGA Step 1: Update role in DynamoDB (handles last-admin guard)
+    # SAGA Step 1: Update role in DynamoDB
     try:
         updated = permissions_repo.set_member_role(user_sub, team_id, new_role)
-    except ValueError as e:
-        # Last-admin guard
-        return create_response(409, {'error': str(e)})
     except KeyError:
         return create_response(404, {'error': 'Membership not found'})
 
@@ -128,7 +114,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         'role': new_role,
     }
 
-    logger.info(f"Set role for {user_sub} in team {team_id} to {new_role}")
+    logger.info(f"Set role in team {team_id} to {new_role}")
     return create_response(200, response_body)
 
 
@@ -155,8 +141,7 @@ def _sync_role_to_cognito(sub: str, team_id: str, new_role: str, user_pool_id: s
         raise
 
     # Step 2: Remove from all other team role groups
-    all_roles = ['admin', 'team_lead', 'editor', 'executor', 'viewer']
-    for role in all_roles:
+    for role in TEAM_ROLES:
         if role == new_role:
             continue
         old_group = f'team-{team_id}-{role}'

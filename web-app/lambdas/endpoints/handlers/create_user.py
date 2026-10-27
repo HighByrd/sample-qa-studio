@@ -6,12 +6,14 @@ from typing import Any, Dict
 import boto3
 from utils import create_response, require_scopes
 import permissions_repo
+from role_scopes import TEAM_ROLES
 from perm_audit import log_permission_change
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-_VALID_ROLES = {'admin', 'team_lead', 'editor', 'executor', 'viewer'}
+# 'admin' means the studio-wide 'admins' group; anything else is a team role.
+_VALID_ROLES = ('admin',) + TEAM_ROLES
 
 
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -89,7 +91,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if team_id and not role:
         role = 'viewer'  # Default role when team is specified
     if role and role not in _VALID_ROLES:
-        return create_response(400, {'error': f'Invalid role. Must be one of: {", ".join(sorted(_VALID_ROLES))}'})
+        return create_response(400, {'error': f'Invalid role. Must be one of: {", ".join(_VALID_ROLES)}'})
 
     # If team specified, verify it exists
     if team_id:

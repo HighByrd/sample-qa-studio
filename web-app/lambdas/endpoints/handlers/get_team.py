@@ -1,8 +1,9 @@
 import lambda_init  # noqa: F401 — must be first import
 import logging
 from typing import Any, Dict
-from utils import create_response, require_scopes, extract_user_identity, validate_path_id
+from utils import create_response, extract_user_identity, validate_path_id
 import permissions_repo
+from resource_auth import require_team_role
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -22,22 +23,13 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         403: Insufficient permissions
         404: Team not found
     """
-    # Try admin scope first
-    user_identity, error_response = require_scopes(event, ['api/admin'])
-    if error_response:
-        # Not admin — check team membership
-        identity = extract_user_identity(event)
-        if identity.get('is_admin'):
-            user_identity = identity
-        else:
-            team_id_raw = (event.get('pathParameters') or {}).get('id', '')
-            team_roles = identity.get('team_roles', [])
-            is_member = any(
-                tr.get('team_id') == team_id_raw for tr in team_roles
-            )
-            if not is_member:
-                return create_response(403, {'error': 'Forbidden: admin or team member required'})
-            user_identity = identity
+    # Auth: admin or any member of the team
+    user_identity = extract_user_identity(event)
+    team_id_raw = (event.get('pathParameters') or {}).get('id', '')
+    auth_error = require_team_role(user_identity, team_id_raw, 'viewer',
+                                   'Forbidden: admin or team member required')
+    if auth_error:
+        return auth_error
 
     # Validate path parameter
     team_id, error = validate_path_id(

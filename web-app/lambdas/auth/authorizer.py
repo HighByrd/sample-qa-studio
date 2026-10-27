@@ -6,13 +6,18 @@ import lambda_init  # noqa: F401 — must be first import to add dependencies/ t
 import json
 import os
 import logging
+import time
 from typing import Any, Dict
 import base64
 import urllib.request
 import urllib.parse
 from urllib.error import URLError
 
-from role_scopes import scopes_for_groups, parse_group, is_admin_group
+import boto3
+
+from role_scopes import (
+    scopes_for_groups, parse_group, is_admin_group, M2M_TEAM_ROLES, M2M_FORBIDDEN_SCOPES,
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -96,6 +101,45 @@ def resolve_team_context(groups: list) -> list:
             team_roles.append(parsed)
     return team_roles
 
+# OAuth client -> team binding (OAUTH_CLIENTS/{client_id}.team_id/team_role),
+# cached per warm container. API Gateway also caches the whole policy (5 min).
+CLIENT_BINDING_TTL_SECONDS = 60
+_client_binding_cache: Dict[str, tuple] = {}
+
+
+def _get_clients_table():
+    """DynamoDB table holding the OAUTH_CLIENTS records."""
+    return boto3.resource('dynamodb').Table(os.environ['TABLE_NAME'])
+
+
+def _lookup_client_binding(client_id: str) -> list:
+    """
+    Team binding of an M2M client as authorizer teamRoles.
+
+    Returns:
+        [{'team_id', 'role'}] for a bound client, [] when unbound, when the
+        role isn't an allowed M2M role, or when the lookup fails (fail closed;
+        failures are not cached).
+    """
+    now = time.monotonic()
+    cached = _client_binding_cache.get(client_id)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        item = _get_clients_table().get_item(
+            Key={'pk': 'OAUTH_CLIENTS', 'sk': client_id},
+            ProjectionExpression='team_id, team_role',
+        ).get('Item') or {}
+    except Exception as e:
+        logger.error(f"client_binding_lookup_failed: client_id={client_id} error={type(e).__name__}")
+        return []
+    team_id = item.get('team_id')
+    role = item.get('team_role')
+    binding = [{'team_id': team_id, 'role': role}] if team_id and role in M2M_TEAM_ROLES else []
+    _client_binding_cache[client_id] = (now + CLIENT_BINDING_TTL_SECONDS, binding)
+    return binding
+
+
 # Import JWT libraries — fail closed if not available
 try:
     import jwt
@@ -117,12 +161,12 @@ def get_jwks():
         
         # Validate URL scheme to prevent SSRF via file:// or other schemes
         parsed = urllib.parse.urlparse(jwks_url)
-        if parsed.scheme != 'https' or not parsed.hostname.endswith('.amazonaws.com'):
-            raise ValueError(f"JWKS URL must be an HTTPS amazonaws.com endpoint")
+        if parsed.scheme != 'https' or parsed.hostname != f"cognito-idp.{region}.amazonaws.com":
+            raise ValueError("JWKS URL must be the HTTPS Cognito endpoint for this region")
         
         try:
             req = urllib.request.Request(jwks_url, method='GET')  # nosemgrep: dynamic-urllib-use-detected
-            with urllib.request.urlopen(req) as response:  # nosemgrep: dynamic-urllib-use-detected
+            with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310 nosemgrep: dynamic-urllib-use-detected - scheme/host validated above
                 jwks_cache = json.loads(response.read().decode())
         except URLError as e:
             logger.error(f"Failed to fetch JWKS: {str(e)}")
@@ -329,6 +373,17 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 team_roles = resolve_team_context(cognito_groups)
                 is_admin = any(is_admin_group(g.strip() if isinstance(g, str) else str(g)) for g in cognito_groups)
                 logger.info(f"Team roles: {team_roles}, isAdmin: {is_admin}")
+            elif identity_type == 'client':
+                # M2M clients never hold studio-wide or team-management scopes,
+                # even if the Cognito app client still allows them (legacy).
+                scope = ' '.join(s for s in scope.split() if s not in M2M_FORBIDDEN_SCOPES)
+                worker_client_id = os.environ.get('WORKER_CLIENT_ID')
+                if worker_client_id and client_id == worker_client_id:
+                    # The shared worker acts only through its execution capability.
+                    identity_type = 'worker'
+                else:
+                    team_roles = _lookup_client_binding(client_id)
+                logger.info(f"Client identity: type={identity_type} teamRoles={team_roles}")
 
             # principal_id is the email for user tokens, so log sub/client_id instead.
             logger.info(f"Authorized: {sub or client_id} (type: {identity_type}, scopes: {scope})")

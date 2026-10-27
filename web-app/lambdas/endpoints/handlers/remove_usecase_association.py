@@ -1,42 +1,24 @@
 import logging
 from typing import Any, Dict
 import boto3
-from utils import create_response, get_table_name, require_scopes, validate_path_id
+from utils import no_content_response, get_table_name, validate_path_id
+from resource_auth import require_resource_access, app_from_path
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+@require_resource_access('edit', app_from_path, scopes=['api/applications.write'])
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
-    user_identity, error_response = require_scopes(event, ['api/applications.write'])
-    if error_response:
-        return error_response
 
     path_params = event.get('pathParameters', {})
-    app_id, error = validate_path_id(path_params.get('id'), 'application ID')
-    if error:
-        return error
+    app_id = path_params['id']  # validated by app_from_path
     usecase_id, error = validate_path_id(path_params.get('usecaseId'), 'usecase ID')
     if error:
         return error
 
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table(get_table_name())
-
-    # Load the app for existence + resource-level authorization.
-    app_meta = table.get_item(
-        Key={'pk': f'APPLICATION#{app_id}', 'sk': 'METADATA'}
-    ).get('Item')
-    if not app_meta:
-        return create_response(404, {'error': 'Application not found'})
-
-    # Resource-level authorization: caller must have edit access to the app.
-    from resource_auth import authorize_resource
-    _, auth_err = authorize_resource(
-        event, app_id, 'edit', owner_team_id=app_meta.get('owner_team_id') or None
-    )
-    if auth_err:
-        return auth_err
 
     table.delete_item(Key={'pk': f'APPLICATION#{app_id}', 'sk': f'USECASE#{usecase_id}'})
 
@@ -47,7 +29,10 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         resp = table.update_item(
             Key={'pk': 'USECASES', 'sk': f'USECASE#{usecase_id}'},
             UpdateExpression='REMOVE application_id',
-            ConditionExpression='attribute_exists(pk)',
+            # Only detach a use case that belongs to this app; edit on this
+            # app must not orphan another app's use case.
+            ConditionExpression='attribute_exists(pk) AND application_id = :app_id',
+            ExpressionAttributeValues={':app_id': app_id},
             ReturnValues='UPDATED_OLD',
         )
         was_associated = (resp.get('Attributes') or {}).get('application_id') is not None
@@ -63,4 +48,4 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     logger.info(f"Removed usecase {usecase_id} from application {app_id}")
-    return create_response(200, {'status': 'association removed'})
+    return no_content_response()

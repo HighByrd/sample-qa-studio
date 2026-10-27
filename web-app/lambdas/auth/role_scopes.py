@@ -4,9 +4,12 @@ Single source of truth for role-to-scope mappings.
 Defines 5 roles: admin, team_lead, editor, executor, viewer.
 Provides functions for resolving scopes from Cognito group names.
 
+Admin is studio-wide and lives only in the global 'admins' group. It is never
+a team role: 'team-{teamId}-admin' is not a recognized group and grants nothing.
+
 Group naming convention:
 - Legacy groups: 'users', 'admins'
-- Team groups: 'team-{teamId}-{role}' (e.g. team-abc123-editor)
+- Team groups: 'team-{teamId}-{role}' with role in TEAM_ROLES (e.g. team-abc123-editor)
 """
 
 import re
@@ -14,6 +17,14 @@ from typing import Optional
 
 # Ordered roles — highest privilege first
 ROLES = ['admin', 'team_lead', 'editor', 'executor', 'viewer']
+
+# Roles that can be held inside a team (admin is studio-wide only)
+TEAM_ROLES = ('team_lead', 'editor', 'executor', 'viewer')
+
+# M2M (OAuth client) rules: a client is bound to one team with at most the
+# 'editor' role and may never hold studio-wide or team-management scopes.
+M2M_TEAM_ROLES = ('editor', 'executor', 'viewer')
+M2M_FORBIDDEN_SCOPES = frozenset({'api/admin', 'api/teams.manage'})
 
 # Numeric rank for role comparison (higher = more privilege)
 ROLE_RANK = {
@@ -134,7 +145,7 @@ def parse_group(group_name: str) -> Optional[dict]:
     if match:
         team_id = match.group(1)
         role = match.group(2)
-        if role in ROLE_RANK:
+        if role in TEAM_ROLES:
             return {
                 'team_id': team_id,
                 'role': role,
@@ -148,16 +159,15 @@ def is_admin_group(group_name: str) -> bool:
     """
     Check if a group name grants admin privileges.
 
+    Only the global 'admins' group does. Team groups never grant admin.
+
     Args:
         group_name: Raw Cognito group name
 
     Returns:
-        True if the group grants admin role.
+        True if the group is the global 'admins' group.
     """
-    parsed = parse_group(group_name)
-    if parsed is None:
-        return False
-    return parsed['role'] == 'admin'
+    return group_name.strip() == 'admins'
 
 
 def scopes_for_groups(groups: list) -> set:

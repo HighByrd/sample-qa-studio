@@ -153,6 +153,7 @@ Since the CLI-unified-runner refactor, the ECS worker container invokes the `qa-
 | `WORKER_MODE` | ECS task definition (optional) | `batch` (default) → invokes `qa-studio run`. `wizard` → defers to `wizard_worker.py`. |
 | `USECASE_ID` | ECS task definition | Required in batch mode; passed as `--usecase-id`. |
 | `EXECUTION_ID` | ECS task definition | Required in batch mode; passed as `--execution-id` so the CLI attaches to the pre-created record. |
+| `EXECUTION_TOKEN` | ECS container override set by `execute_usecase` | Worker execution token (see [below](#worker-execution-token)). Exported as `QA_STUDIO_EXECUTION_TOKEN`, then unset. |
 | `QA_STUDIO_API_URL_SSM` | CDK worker stack | SSM parameter name the entrypoint reads to discover the API URL. Written as `QA_STUDIO_API_URL` for the CLI. |
 | `QA_STUDIO_TOKEN_ENDPOINT_SSM` | CDK worker stack | SSM parameter name for the Cognito `/oauth2/token` endpoint. Written as `OAUTH_TOKEN_ENDPOINT` for the CLI. |
 | `OAUTH_CLIENT_ID` | ECS `secrets:` → Secrets Manager | M2M client ID (JSON field `client_id` of the `${baseName}-worker-m2m-credentials` secret). |
@@ -163,6 +164,27 @@ Since the CLI-unified-runner refactor, the ECS worker container invokes the `qa-
 | `BEDROCK_EXECUTION_ROLE` | ECS task definition | IAM role assumed by AgentCore browsers. |
 | `AGENT_CORE_VPC` + `AC_VPC_ID` / `AC_SUBNET_ID` / `AC_SECURITY_GROUP_ID` | ECS task definition (when `agentCoreVPC: true` in `configuration.json`) | Put AgentCore browsers in a VPC. |
 | `S3_BUCKET` | ECS task definition | Artefact bucket the AgentCore provisioner writes recordings to. |
+
+### Worker execution token
+
+Binds the worker to the one execution it runs. Set automatically; there's nothing to configure. See [architecture](architecture.md#worker-execution-capability).
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `EXECUTION_TOKEN` | string (43-char URL-safe random) | unset | Minted per execution by `execute_usecase` for `Scheduled` and `OnDemandHeadless` runs and passed to the ECS task. Only its SHA-256 is stored (`worker_token_hash`). When unset, the entrypoint logs a warning (without the value) and the run's API calls are denied. |
+| `QA_STUDIO_EXECUTION_TOKEN` | string `{usecase_id}:{execution_id}:{token}` | unset | Read by the `qa-studio` CLI. When set and non-empty, every API request carries it as the `X-QA-Execution-Token` header; it's never logged. Leave it unset for local runs. |
+
+### Lambda authorizer environment
+
+Set by the API stack (`lib/authorizer-client-binding.ts`); no `configuration.json` option.
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `TABLE_NAME` | string | storage stack table name | DynamoDB table holding `OAUTH_CLIENTS` records. The authorizer reads the client's `team_id` / `team_role` with `GetItem` (IAM limited to `dynamodb:LeadingKeys = OAUTH_CLIENTS`). |
+| `WORKER_CLIENT_ID` | string | auth stack worker M2M client ID | Tokens from this client get `identityType=worker` and no team roles; they only work with a valid execution token. |
+| — (constant) `CLIENT_BINDING_TTL_SECONDS` | int | `60` | In-memory cache lifetime of a client binding in a warm authorizer container. API Gateway also caches the authorizer result for 5 minutes. |
+
+No new `configuration.json` options were added for team-bound authorization.
 
 ### SSM parameters written by the stacks
 

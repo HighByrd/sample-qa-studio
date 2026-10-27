@@ -4,14 +4,17 @@ import os
 import logging
 from typing import Any, Dict
 import boto3
-from utils import create_response, require_scopes
+from utils import create_response, require_scopes, aws_error_code
 import permissions_repo
+import cognito_sync
+from role_scopes import TEAM_ROLES
 from perm_audit import log_permission_change
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-_VALID_ROLES = {'admin', 'team_lead', 'editor', 'executor', 'viewer'}
+# 'admin' means the studio-wide 'admins' group; anything else is a team role.
+_VALID_ROLES = ('admin',) + TEAM_ROLES
 
 
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -30,6 +33,8 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         200: Updated user {userId, teamId, role}
         400: Invalid input
         403: Insufficient permissions
+        409: Demoting the last member of the global 'admins' group
+        500: Last-admin check failed (fail closed)
     """
     user_identity, error_response = require_scopes(event, ['api/admin'])
     if error_response:
@@ -51,7 +56,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if not role:
         return create_response(400, {'error': 'role is required'})
     if role not in _VALID_ROLES:
-        return create_response(400, {'error': f'Invalid role. Must be one of: {", ".join(sorted(_VALID_ROLES))}'})
+        return create_response(400, {'error': f'Invalid role. Must be one of: {", ".join(_VALID_ROLES)}'})
 
     user_pool_id = os.environ.get('USER_POOL_ID', '')
 
@@ -68,20 +73,20 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 permissions_repo.remove_membership(user_sub, old_team_id)
             except Exception as e:
-                logger.warning(f"Failed to remove membership {old_team_id} for {user_sub}: {e}")
+                logger.warning(f"Failed to remove membership {old_team_id}: {e}")
             if client:
                 try:
                     client.admin_remove_user_from_group(
                         UserPoolId=user_pool_id, Username=user_sub,
                         GroupName=f'team-{old_team_id}-{old_role}')
                 except Exception as e:
-                    logger.warning(f"Failed to remove old group for {user_sub}: {e}")
+                    logger.warning(f"Failed to remove old group: {e}")
         if client:
             try:
                 client.admin_add_user_to_group(
                     UserPoolId=user_pool_id, Username=user_sub, GroupName='admins')
             except Exception as e:
-                logger.warning(f"Failed to add {user_sub} to 'admins' group: {e}")
+                logger.warning(f"Failed to add to 'admins' group: {e}")
         actor = {'sub': user_identity.get('sub', ''), 'email': user_identity.get('email', '')}
         log_permission_change(actor=actor, action='user_update',
                               target={'user_sub': user_sub}, details={'role': 'admin'})
@@ -94,6 +99,16 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     team = permissions_repo.get_team(team_id)
     if not team:
         return create_response(404, {'error': 'Team not found'})
+
+    # Last-admin guard (global 'admins' group): never demote the only admin.
+    # Fail closed if the check itself fails.
+    if user_pool_id:
+        try:
+            if cognito_sync.is_last_studio_admin(user_sub, user_pool_id):
+                return create_response(409, {'error': 'Cannot demote the last admin'})
+        except Exception as e:
+            logger.error(f"Last-admin check failed: {aws_error_code(e)}")
+            return create_response(500, {'error': 'Failed to verify admin membership'})
 
     # Check if user already has a membership in this team
     existing_teams = permissions_repo.list_user_teams(user_sub)
@@ -117,18 +132,14 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         if old_role == role:
             return create_response(200, {'userId': user_sub, 'teamId': team_id, 'role': role})
 
-        try:
-            permissions_repo.set_member_role(user_sub, team_id, role)
-        except ValueError as e:
-            return create_response(409, {'error': str(e)})
+        permissions_repo.set_member_role(user_sub, team_id, role)
 
         # Sync Cognito groups
         if user_pool_id:
             try:
-                import cognito_sync
                 cognito_sync.set_user_role(user_sub, team_id, old_role, role, user_pool_id)
             except Exception as e:
-                logger.warning(f"Cognito sync failed for user {user_sub} role change: {e}")
+                logger.warning(f"Cognito sync failed for role change: {e}")
     else:
         # Moving to a new team — remove all existing memberships first so the
         # user ends up in exactly one team (one-team-per-user model).
@@ -140,10 +151,8 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             try:
                 permissions_repo.remove_membership(user_sub, old_team_id)
-                if old_role == 'admin':
-                    permissions_repo._decrement_admin_count()
             except Exception as e:
-                logger.warning(f"Failed to remove old membership {old_team_id} for {user_sub}: {e}")
+                logger.warning(f"Failed to remove old membership {old_team_id}: {e}")
             if client:
                 try:
                     client.admin_remove_user_from_group(
@@ -152,12 +161,10 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
                         GroupName=f'team-{old_team_id}-{old_role}',
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to remove user {user_sub} from old group: {e}")
+                    logger.warning(f"Failed to remove user from old group: {e}")
 
         # Add membership to new team
         permissions_repo.add_membership(team_id, user_sub, role)
-        if role == 'admin':
-            permissions_repo._increment_admin_count()
 
         # Add to Cognito group
         if client:
@@ -168,7 +175,7 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
                     GroupName=f'team-{team_id}-{role}',
                 )
             except Exception as e:
-                logger.warning(f"Cognito sync failed for user {user_sub}: {e}")
+                logger.warning(f"Cognito sync failed: {e}")
 
     # Audit log
     actor = {'sub': user_identity.get('sub', ''), 'email': user_identity.get('email', '')}
@@ -179,5 +186,5 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         details={'team_id': team_id, 'role': role},
     )
 
-    logger.info(f"Updated user {user_sub}: team={team_id}, role={role}")
+    logger.info(f"Updated user: team={team_id}, role={role}")
     return create_response(200, {'userId': user_sub, 'teamId': team_id, 'role': role})

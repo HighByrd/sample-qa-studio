@@ -460,17 +460,13 @@ class ExecutionEngine:
             duration = (datetime.utcnow() - start_time).total_seconds()
             final_status = "success" if result["success"] else "failed"
 
-            await self.execution_api.update_status(
-                usecase_id=usecase_id, execution_id=execution_id,
-                status=final_status, error_message=result.get("error"),
-            )
+            # Upload artifacts and request the recording BEFORE the final
+            # status: a cloud worker's execution capability is only valid
+            # while the execution is pending/running.
             execution_artifacts = artifact_capture.get_execution_artifacts()
             await artifact_uploader.upload_execution_artifacts(
                 usecase_id=usecase_id, execution_id=execution_id, artifacts=execution_artifacts,
             )
-
-            status_label = "PASSED" if result["success"] else "FAILED"
-            logger.info("[%s] Completed: %s (%.1fs)", usecase_name, status_label, duration)
 
             # Request async recording download for mobile executions
             if execution_details.get("test_platform") == "mobile":
@@ -490,6 +486,14 @@ class ExecutionEngine:
                         logger.warning("[%s] No Device Farm session ARN — cannot request recording", usecase_name)
                 except Exception as rec_err:
                     logger.warning("[%s] Failed to request recording download: %s", usecase_name, rec_err)
+
+            await self.execution_api.update_status(
+                usecase_id=usecase_id, execution_id=execution_id,
+                status=final_status, error_message=result.get("error"),
+            )
+
+            status_label = "PASSED" if result["success"] else "FAILED"
+            logger.info("[%s] Completed: %s (%.1fs)", usecase_name, status_label, duration)
 
             return {
                 "execution_id": execution_id,

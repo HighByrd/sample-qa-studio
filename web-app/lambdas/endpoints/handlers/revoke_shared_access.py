@@ -1,8 +1,9 @@
 import lambda_init  # noqa: F401 — must be first import
 import logging
 from typing import Any, Dict
-from utils import create_response, require_scopes, extract_user_identity, validate_path_id
+from utils import create_response, extract_user_identity, validate_path_id
 import permissions_repo
+from resource_auth import require_team_role
 from perm_audit import log_permission_change
 
 logger = logging.getLogger()
@@ -26,21 +27,12 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
         404: Grant not found
     """
     # Auth: admin or team-lead of the owning team
-    user_identity, error_response = require_scopes(event, ['api/admin'])
-    if error_response:
-        identity = extract_user_identity(event)
-        if identity.get('is_admin'):
-            user_identity = identity
-        else:
-            team_id_raw = (event.get('pathParameters') or {}).get('id', '')
-            team_roles = identity.get('team_roles', [])
-            is_team_lead = any(
-                tr.get('team_id') == team_id_raw and tr.get('role') in ('admin', 'team_lead')
-                for tr in team_roles
-            )
-            if not is_team_lead:
-                return create_response(403, {'error': 'Admin or team lead of the owning team required'})
-            user_identity = identity
+    user_identity = extract_user_identity(event)
+    team_id_raw = (event.get('pathParameters') or {}).get('id', '')
+    auth_error = require_team_role(user_identity, team_id_raw, 'team_lead',
+                                   'Admin or team lead of the owning team required')
+    if auth_error:
+        return auth_error
 
     owner_team_id, error = validate_path_id(
         (event.get('pathParameters') or {}).get('id'), 'team ID'

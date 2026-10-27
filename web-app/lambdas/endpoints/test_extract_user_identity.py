@@ -203,3 +203,39 @@ class TestExtractUserIdentityFallback:
 
         identity = extract_user_identity(event)
         assert identity['identity_type'] == 'unknown'
+
+
+class TestM2MIdentityTeamBinding:
+    """Client and worker identities (H-2 M2M binding)."""
+
+    def test_client_carries_team_binding_and_is_never_admin(self):
+        identity = extract_user_identity(_make_event({
+            'clientId': 'ci-client', 'identityType': 'client', 'scope': 'api/usecases.read',
+            'teamRoles': json.dumps([{'team_id': 'team-a', 'role': 'editor'}]),
+            'isAdmin': 'true',
+        }))
+        assert identity['identity_type'] == 'client'
+        assert identity['team_roles'] == [{'team_id': 'team-a', 'role': 'editor'}]
+        assert identity['is_admin'] is False
+
+    def test_unbound_client_has_no_team_roles(self):
+        identity = extract_user_identity(_make_event({'clientId': 'c', 'identityType': 'client', 'scope': ''}))
+        assert identity['team_roles'] == [] and identity['is_admin'] is False
+
+    def test_fallback_client_carries_team_binding(self):
+        identity = extract_user_identity(_make_event({
+            'client_id': 'c', 'scope': 'api/usecases.read',
+            'teamRoles': json.dumps([{'team_id': 'team-a', 'role': 'viewer'}]),
+        }))
+        assert identity['identity_type'] == 'client'
+        assert identity['team_roles'] == [{'team_id': 'team-a', 'role': 'viewer'}]
+        assert identity['is_admin'] is False
+
+    def test_worker_identity_ignores_team_roles(self):
+        identity = extract_user_identity(_make_event({
+            'clientId': 'worker-client', 'identityType': 'worker', 'scope': 'api/executions.write',
+            'teamRoles': json.dumps([{'team_id': 'team-a', 'role': 'editor'}]), 'isAdmin': 'true',
+        }))
+        assert identity['identity_type'] == 'worker'
+        assert identity['client_id'] == 'worker-client'
+        assert identity['team_roles'] == [] and identity['is_admin'] is False

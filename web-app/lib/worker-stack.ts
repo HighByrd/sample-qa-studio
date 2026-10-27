@@ -981,6 +981,7 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
     this.createScheduleLambda = this.createPythonLambda({
       path: 'create_schedule',
       environment: {
+        TABLE_NAME: props.table.tableName,
         SCHEDULER_GROUP_NAME: this.schedulerGroup.name!,
         EXECUTE_USECASE_LAMBDA_ARN: this.executeUsecaseLambda.functionArn,
         SCHEDULER_TARGET_ROLE_ARN: this.schedulerRole.roleArn
@@ -1015,6 +1016,7 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
     this.restartWizardLambda = this.createPythonLambda({
       path: 'restart_wizard',
       environment: {
+        TABLE_NAME: props.table.tableName,
         WIZARD_QUEUE_URL: this.wizardQueue.queueUrl,
         WIZARD_EVENT_BUS_NAME: this.wizardEventBus.eventBusName,
       }
@@ -1052,6 +1054,12 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
     props.table.grantReadWriteData(this.addWizardStepLambda);
     props.table.grantReadWriteData(this.terminateWizardLambda);
     props.table.grantReadWriteData(processWizardCommandLambda);
+
+    // Need table read for the require_resource_access owner lookup (these
+    // routes have no other table access). Guarded by
+    // lib/__tests__/ownership-check-iam.test.ts.
+    [this.createScheduleLambda, this.restartWizardLambda]
+      .forEach(lambda => lambda.role?.addManagedPolicy(props.tableReadPolicy));
 
     this.wizardQueue.grantSendMessages(this.startWizardLambda);
     this.wizardQueue.grantSendMessages(this.addWizardStepLambda);

@@ -6,16 +6,18 @@ from utils import (
     create_response,
     get_table_name,
     get_current_timestamp,
-    require_scopes,
+    extract_user_identity,
     generate_uuid7
 )
 from test_suite_schema import create_test_suite_item
+from resource_auth import require_resource_access, app_from_body
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+@require_resource_access('edit', app_from_body('application_id'), scopes=['api/suite.write'])
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Lambda handler to create a new test suite.
@@ -76,10 +78,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if not isinstance(tags, list):
             return create_response(400, {'error': 'tags must be an array'})
         
-        # Validate scope access (requires api/suite.write or admin)
-        user_identity, error_response = require_scopes(event, ['api/suite.write'])
-        if error_response:
-            return error_response
+        user_identity = extract_user_identity(event)
         
         user_identity_str = user_identity.get('identity', '')
         
@@ -112,17 +111,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             schedule_timezone=schedule_timezone
         )
         
-        # Application association (required)
-        application_id = body.get('application_id', '').strip()
-        if not application_id:
-            return create_response(400, {'error': 'application_id is required'})
+        # Application association (required; edit on it checked by the decorator)
+        application_id = body['application_id']
         suite_item['application_id'] = application_id
 
-        # Resource-level authorization: caller must have edit access to the app
-        from resource_auth import authorize_resource
-        _, auth_err = authorize_resource(event, application_id, 'edit')
-        if auth_err:
-            return auth_err
 
         # Set owner_team_id from the parent app's team ownership
         try:

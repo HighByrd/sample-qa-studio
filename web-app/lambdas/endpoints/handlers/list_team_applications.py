@@ -1,17 +1,18 @@
 import lambda_init  # noqa: F401 — must be first import
 import logging
 from typing import Any, Dict
-import boto3
-from boto3.dynamodb.conditions import Key
-from utils import create_response, get_table_name, require_scopes, extract_user_identity, validate_path_id
+from utils import create_response, require_scopes, validate_path_id
+from resource_auth import require_team_role
 import permissions_repo
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+_INTERNAL_KEYS = ('pk', 'sk', 'gsi2pk', 'gsi2sk')
+
 
 def handle(event: Dict[str, Any]) -> Dict[str, Any]:
-    """List applications owned by a specific team."""
+    """List applications owned by a team. Members of the team or admins only."""
     user_identity, error_response = require_scopes(event, ['api/applications.read'])
     if error_response:
         return error_response
@@ -22,31 +23,13 @@ def handle(event: Dict[str, Any]) -> Dict[str, Any]:
     if error:
         return error
 
-    # Get apps with owner_team_id matching this team
-    dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table(get_table_name())
+    role_err = require_team_role(user_identity, team_id, 'viewer', 'Team membership required')
+    if role_err:
+        return role_err
 
-    # Scan applications and filter by owner_team_id
-    index_response = table.query(
-        KeyConditionExpression=Key('pk').eq('APPLICATIONS') & Key('sk').begins_with('APPLICATION#')
-    )
-    app_ids = [item['id'] for item in index_response.get('Items', [])]
-
-    if not app_ids:
-        return create_response(200, [])
-
-    keys = [{'pk': f'APPLICATION#{aid}', 'sk': 'METADATA'} for aid in app_ids]
-    batch_response = dynamodb.batch_get_item(
-        RequestItems={get_table_name(): {'Keys': keys}}
-    )
-    all_apps = batch_response.get('Responses', {}).get(get_table_name(), [])
-
-    # Filter to apps owned by this team
-    team_apps = []
-    for app in all_apps:
-        if app.get('owner_team_id') == team_id:
-            app.pop('pk', None)
-            app.pop('sk', None)
-            team_apps.append(app)
+    team_apps = permissions_repo.list_team_apps(team_id)
+    for app in team_apps:
+        for key in _INTERNAL_KEYS:
+            app.pop(key, None)
 
     return create_response(200, team_apps)

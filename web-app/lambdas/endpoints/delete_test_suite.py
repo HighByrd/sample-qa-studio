@@ -7,8 +7,10 @@ from botocore.exceptions import ClientError
 from utils import (
     create_response,
     get_table_name,
-    require_scopes,
-    validate_path_id)
+    validate_path_id,
+    extract_user_identity,
+)
+from resource_auth import require_resource_access, suite_from_path
 from test_suite_schema import (
     get_test_suites_pk,
     get_suite_sk,
@@ -20,6 +22,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+@require_resource_access('delete', suite_from_path, scopes=['api/suite.write'])
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Lambda handler to delete a test suite and all related data.
@@ -37,16 +40,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     try:
         # Extract suite_id from path parameters
-        path_params = event.get('pathParameters', {})
         suite_id, error = validate_path_id(event.get('pathParameters', {}).get('suite_id'), 'suite ID')
         if error:
             return error
         
-        # Validate scope access (requires api/suite.write or admin)
-        user_identity, error_response = require_scopes(event, ['api/suite.write'])
-        if error_response:
-            return error_response
-        
+        user_identity = extract_user_identity(event)
         logger.info(f"Deleting test suite {suite_id} for user: {user_identity.get('identity')}")
         
         # Initialize Amazon DynamoDB client
@@ -68,14 +66,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         suite = response['Item']
 
-        # Resource-level authorization: check delete access on the suite's app
-        suite_app_id = suite.get('application_id', '')
-        if suite_app_id:
-            from resource_auth import authorize_resource
-            _, auth_err = authorize_resource(event, suite_app_id, 'delete')
-            if auth_err:
-                return auth_err
-        
         # Disable Amazon EventBridge schedule if exists
         if suite.get('schedule_enabled'):
             disable_suite_schedule(suite_id)
