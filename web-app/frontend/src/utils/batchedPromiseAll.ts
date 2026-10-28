@@ -5,7 +5,7 @@
 export async function batchedPromiseAll<T>(
   items: T[],
   task: (item: T) => Promise<unknown>,
-  batchSize: number = __APP_CONFIG__.lambdaConcurrency,
+  batchSize: number = __APP_CONFIG__.lambdaConcurrency || 5,
 ): Promise<Awaited<ReturnType<typeof task>>[]> {
   const results: Awaited<ReturnType<typeof task>>[] = [];
 

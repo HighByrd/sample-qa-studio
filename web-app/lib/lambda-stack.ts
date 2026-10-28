@@ -199,6 +199,7 @@ export class NovaActQAStudioLambdaStack extends NovaActQAStudioBaseStack {
 
     this.deleteUsecaseLambda = this.createPythonLambda({
       path: 'delete_usecase',
+      timeout: cdk.Duration.seconds(30),
       environment: { TABLE_NAME: props.table.tableName }
     })
 

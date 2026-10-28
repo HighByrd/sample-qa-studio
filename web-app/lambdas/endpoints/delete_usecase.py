@@ -134,7 +134,7 @@ def delete_workflow_definition(usecase_id: str):
         novaact_client = boto3.client('nova-act', region_name='us-east-1')
         
         # Try to delete the workflow definition
-        novaact_client.delete_workflow_definition(WorkflowDefinitionName=workflow_name)
+        novaact_client.delete_workflow_definition(workflowDefinitionName=workflow_name)
         
         logger.info(f"Successfully deleted workflow definition '{workflow_name}' for usecase {usecase_id}")
         
