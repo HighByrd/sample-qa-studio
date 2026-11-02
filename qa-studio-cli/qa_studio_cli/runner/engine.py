@@ -279,7 +279,8 @@ class ExecutionEngine:
 
         # Error gate (opt-in): a browser-green run still fails if the target app
         # logged new server errors during it. Appended as a visible synthetic step.
-        if error_gate.is_enabled():
+        # Scoped by starting_url host so it only runs for the app it tests.
+        if error_gate.is_enabled(starting_url=starting_url):
             gate = error_gate.check(gate_before_ms)
             step_results.append(StepResultDetail(
                 step_id="error-gate",
@@ -476,7 +477,7 @@ class ExecutionEngine:
             )
             # Error gate (opt-in): fold a server-error check into the result so a
             # browser-green run still fails if the app logged new errors during it.
-            if error_gate.is_enabled() and result.get("success"):
+            if error_gate.is_enabled(starting_url=execution_details.get("starting_url")) and result.get("success"):
                 gate = await asyncio.to_thread(error_gate.check, gate_before_ms)
                 if not gate.passed:
                     result = {**result, "success": False, "error": f"error gate: {gate.detail}"}

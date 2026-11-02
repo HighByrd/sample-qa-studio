@@ -475,6 +475,13 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
       // Maximum body size accepted by network_assertion steps — read at
       // worker boot.  See lib/config.ts networkAssertionBodyMaxBytes.
       NETWORK_ASSERTION_BODY_MAX_BYTES: this.networkAssertionBodyMaxBytes.toString(),
+      // PURL error gate (runner/error_gate.py): fail a run if the target app
+      // logged a server error during it. Scoped by starting_url host so it only
+      // runs for PURL usecases and can't false-fail usecases targeting other
+      // apps. TEST_SUPPORT_TOKEN is injected as a secret below.
+      ERROR_GATE_ENABLED: 'true',
+      ERROR_GATE_HOSTS: 'staging.my.highbyrd.com,staging.myvisithub.com',
+      TEST_SUPPORT_BASE_URL: 'https://staging.my.highbyrd.com/api/test',
     };
 
     // Add VPC environment variables if agentCoreVPC is enabled
@@ -523,6 +530,12 @@ export class NovaActQAStudioWorkerStack extends NovaActQAStudioBaseStack {
         ),
         OAUTH_CLIENT_SECRET: EcsSecret.fromSecretsManager(
           props.workerCredentialsSecret, 'client_secret',
+        ),
+        // PURL error gate token. Plain-string secret (no JSON field), owned by
+        // the PURL platform in this same account; the execution role's broad
+        // secretsmanager:GetSecretValue (below) already covers it.
+        TEST_SUPPORT_TOKEN: EcsSecret.fromSecretsManager(
+          Secret.fromSecretNameV2(this, 'PurlTestSupportToken', 'purl/staging/test-support-token'),
         ),
       },
     });

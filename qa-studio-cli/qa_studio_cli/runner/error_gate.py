@@ -25,6 +25,7 @@ import os
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -51,13 +52,38 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def is_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
-    """True only when explicitly opted in AND a token is configured."""
+def _host_of(url: str) -> str:
+    try:
+        return (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def is_enabled(
+    env: Optional[Mapping[str, str]] = None,
+    starting_url: Optional[str] = None,
+) -> bool:
+    """True only when: explicitly opted in (ERROR_GATE_ENABLED), a token is
+    configured, AND — if a ``starting_url`` is given — its host is in the
+    allowlist (ERROR_GATE_HOSTS, comma-separated; defaults to the support
+    endpoint's host).
+
+    The host check scopes the gate to the app it actually tests, so the gate can
+    be enabled globally on a shared worker without false-failing usecases that
+    target a different app (which would otherwise be judged against the wrong
+    app's error log)."""
     env = os.environ if env is None else env
-    return (
-        (env.get("ERROR_GATE_ENABLED", "") or "").strip().lower() in _TRUTHY
-        and bool(env.get("TEST_SUPPORT_TOKEN"))
+    if (env.get("ERROR_GATE_ENABLED", "") or "").strip().lower() not in _TRUTHY:
+        return False
+    if not env.get("TEST_SUPPORT_TOKEN"):
+        return False
+    if starting_url is None:
+        return True
+    raw_hosts = env.get("ERROR_GATE_HOSTS") or _host_of(
+        env.get("TEST_SUPPORT_BASE_URL") or DEFAULT_BASE_URL
     )
+    allow = {h.strip().lower() for h in raw_hosts.split(",") if h.strip()}
+    return _host_of(starting_url) in allow
 
 
 @dataclass

@@ -21,6 +21,24 @@ def test_is_enabled_truth_table():
     assert error_gate.is_enabled({"ERROR_GATE_ENABLED": "1", "TEST_SUPPORT_TOKEN": "t"}) is True
 
 
+def test_is_enabled_host_scoping():
+    env = {
+        "ERROR_GATE_ENABLED": "true",
+        "TEST_SUPPORT_TOKEN": "t",
+        "ERROR_GATE_HOSTS": "staging.my.highbyrd.com,staging.myvisithub.com",
+    }
+    # a PURL host runs the gate...
+    assert error_gate.is_enabled(env, "https://staging.myvisithub.com/p/abc") is True
+    assert error_gate.is_enabled(env, "https://staging.my.highbyrd.com/dashboard") is True
+    # ...a different app's host does not (can't false-fail it)
+    assert error_gate.is_enabled(env, "https://staging.highbyrd.com/") is False
+    # default allowlist = the support endpoint host when ERROR_GATE_HOSTS unset
+    env2 = {"ERROR_GATE_ENABLED": "true", "TEST_SUPPORT_TOKEN": "t",
+            "TEST_SUPPORT_BASE_URL": "https://staging.my.highbyrd.com/api/test"}
+    assert error_gate.is_enabled(env2, "https://staging.my.highbyrd.com/x") is True
+    assert error_gate.is_enabled(env2, "https://other.example.com/x") is False
+
+
 class _FakeResp:
     def __init__(self, payload):
         self._payload = payload
