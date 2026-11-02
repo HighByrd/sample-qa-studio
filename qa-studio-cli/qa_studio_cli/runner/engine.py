@@ -31,6 +31,7 @@ from qa_studio_cli.runner.browser import (
 from qa_studio_cli.runner.step_executor import StepExecutor
 from qa_studio_cli.runner.template_parser import TemplateParser
 from qa_studio_cli.runner.workflow_manager import WorkflowManager, NOVA_ACT_REGION
+from qa_studio_cli.runner import error_gate
 from qa_studio_cli.utils.errors import sanitize_error_message
 from qa_studio_cli.validation import validate_step
 
@@ -111,6 +112,7 @@ class ExecutionEngine:
         )
 
         start_time = datetime.utcnow()
+        gate_before_ms = error_gate.now_ms()
         artifacts_dir = Path("/tmp/qa-studio-artifacts") / usecase_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         logs_dir = str(artifacts_dir / "nova_act_logs")
@@ -275,6 +277,22 @@ class ExecutionEngine:
             file_handler.close()
             logging.getLogger().removeHandler(file_handler)
 
+        # Error gate (opt-in): a browser-green run still fails if the target app
+        # logged new server errors during it. Appended as a visible synthetic step.
+        # Scoped by starting_url host so it only runs for the app it tests.
+        if error_gate.is_enabled(starting_url=starting_url):
+            gate = error_gate.check(gate_before_ms)
+            step_results.append(StepResultDetail(
+                step_id="error-gate",
+                step_type="system",
+                instruction="Error gate — new application errors during the run",
+                status="success" if gate.passed else "failed",
+                duration=0,
+                error=None if gate.passed else gate.detail,
+            ))
+            if not gate.passed:
+                overall_status = "failed"
+
         duration = (datetime.utcnow() - start_time).total_seconds()
 
         result = LocalExecutionResult(
@@ -435,6 +453,7 @@ class ExecutionEngine:
 
         logger.info("[%s] Starting execution: %s", usecase_name, execution_id)
         start_time = datetime.utcnow()
+        gate_before_ms = error_gate.now_ms()
 
         suite_id = self.suite_execution_id or "standalone"
         execution_dir = Path.home() / ".ci_runner" / suite_id / execution_id
@@ -456,6 +475,12 @@ class ExecutionEngine:
                 execution_details, usecase_id, execution_id,
                 artifact_capture, artifact_uploader,
             )
+            # Error gate (opt-in): fold a server-error check into the result so a
+            # browser-green run still fails if the app logged new errors during it.
+            if error_gate.is_enabled(starting_url=execution_details.get("starting_url")) and result.get("success"):
+                gate = await asyncio.to_thread(error_gate.check, gate_before_ms)
+                if not gate.passed:
+                    result = {**result, "success": False, "error": f"error gate: {gate.detail}"}
             duration = (datetime.utcnow() - start_time).total_seconds()
             final_status = "success" if result["success"] else "failed"
 
